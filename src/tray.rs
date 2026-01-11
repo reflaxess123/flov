@@ -2,14 +2,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem},
-    TrayIcon, TrayIconBuilder,
+    Icon, TrayIcon, TrayIconBuilder,
 };
 
 pub struct TrayManager {
-    _tray: TrayIcon,
+    tray: TrayIcon,
     quit_id: MenuId,
     glm_id: MenuId,
     glm_enabled: Arc<AtomicBool>,
+    red_icon: Icon,
+    green_icon: Icon,
 }
 
 impl TrayManager {
@@ -24,20 +26,32 @@ impl TrayManager {
         let quit_id = quit_item.id().clone();
         menu.append(&quit_item)?;
 
-        let icon = create_icon()?;
+        let red_icon = create_icon(220, 50, 50)?;
+        let green_icon = create_icon(50, 200, 50)?;
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("Flov - Voice Input (Ctrl+Win)")
-            .with_icon(icon)
+            .with_icon(red_icon.clone())
             .build()?;
 
         Ok(Self {
-            _tray: tray,
+            tray,
             quit_id,
             glm_id,
             glm_enabled,
+            red_icon,
+            green_icon,
         })
+    }
+
+    pub fn set_recording(&self, recording: bool) {
+        let icon = if recording {
+            self.green_icon.clone()
+        } else {
+            self.red_icon.clone()
+        };
+        let _ = self.tray.set_icon(Some(icon));
     }
 
     pub fn check_events(&self) -> bool {
@@ -55,7 +69,7 @@ impl TrayManager {
     }
 }
 
-fn create_icon() -> anyhow::Result<tray_icon::Icon> {
+fn create_icon(r: u8, g: u8, b: u8) -> anyhow::Result<Icon> {
     let size = 32u32;
     let mut rgba = vec![0u8; (size * size * 4) as usize];
 
@@ -71,14 +85,14 @@ fn create_icon() -> anyhow::Result<tray_icon::Icon> {
             let idx = ((y * size + x) * 4) as usize;
 
             if dist <= radius {
-                rgba[idx] = 220;     // R
-                rgba[idx + 1] = 50;  // G
-                rgba[idx + 2] = 50;  // B
-                rgba[idx + 3] = 255; // A
+                rgba[idx] = r;
+                rgba[idx + 1] = g;
+                rgba[idx + 2] = b;
+                rgba[idx + 3] = 255;
             }
         }
     }
 
-    let icon = tray_icon::Icon::from_rgba(rgba, size, size)?;
+    let icon = Icon::from_rgba(rgba, size, size)?;
     Ok(icon)
 }

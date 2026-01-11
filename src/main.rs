@@ -5,7 +5,6 @@ mod audio;
 mod config;
 mod hotkey;
 mod input;
-mod overlay;
 mod transcribe;
 mod tray;
 
@@ -50,8 +49,8 @@ async fn main() -> Result<()> {
     // GLM enabled flag (shared with tray)
     let glm_enabled = Arc::new(AtomicBool::new(false));
 
-    // Create overlay
-    let overlay = Arc::new(overlay::Overlay::new()?);
+    // Recording state flag (for tray icon updates in main thread)
+    let is_recording_icon = Arc::new(AtomicBool::new(false));
 
     // Create tray icon
     let tray = tray::TrayManager::new(glm_enabled.clone())?;
@@ -71,9 +70,9 @@ async fn main() -> Result<()> {
     // Spawn processing task
     let recorder_clone = recorder.clone();
     let transcriber_clone = transcriber.clone();
-    let overlay_clone = overlay.clone();
     let is_pressed_clone = is_pressed.clone();
     let is_recording_clone = is_recording.clone();
+    let is_recording_icon_clone = is_recording_icon.clone();
     let glm_enabled_clone = glm_enabled.clone();
 
     std::thread::spawn(move || {
@@ -84,7 +83,7 @@ async fn main() -> Result<()> {
             }
 
             tracing::info!("Recording started");
-            overlay_clone.show();
+            is_recording_icon_clone.store(true, Ordering::SeqCst);
 
             // Record while pressed
             let is_pressed_for_record = is_pressed_clone.clone();
@@ -92,7 +91,7 @@ async fn main() -> Result<()> {
                 .record_while(move || is_pressed_for_record.load(Ordering::SeqCst))
                 .unwrap_or_default();
 
-            overlay_clone.hide();
+            is_recording_icon_clone.store(false, Ordering::SeqCst);
             tracing::info!("Recording stopped, {} samples", samples.len());
 
             // Reset recording state so hotkey can trigger again
@@ -162,6 +161,8 @@ async fn main() -> Result<()> {
     // Main message loop
     tracing::info!("Flov running. Press Ctrl+Win to record.");
 
+    let mut last_recording_state = false;
+
     unsafe {
         let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
         loop {
@@ -176,6 +177,13 @@ async fn main() -> Result<()> {
             {
                 let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
                 windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
+            }
+
+            // Update tray icon based on recording state
+            let current_recording = is_recording_icon.load(Ordering::SeqCst);
+            if current_recording != last_recording_state {
+                tray.set_recording(current_recording);
+                last_recording_state = current_recording;
             }
 
             if tray.check_events() {

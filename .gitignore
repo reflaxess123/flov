@@ -3,3 +3,4 @@
 *.zip
 models/
 Cargo.lock
+flov.toml

@@ -1,4 +1,5 @@
 # Flov - Voice to Text Assistant
+# Copy this file to flov.toml and fill in your API key
 
 [whisper]
 # Path to whisper model (ggml format)
@@ -13,5 +14,5 @@ sample_rate = 16000
 [api]
 # GLM API for text improvement (optional)
 endpoint = "https://api.z.ai/api/coding/paas/v4/chat/completions"
-key = "f09f485ed38a4df3b8ff6083bc531d1e.KOOuTSKKT1Gw4UW9"
+key = "YOUR_API_KEY_HERE"
 model = "glm-4.5-air"

@@ -1,6 +1,5 @@
 #![windows_subsystem = "windows"]
 
-mod api;
 mod audio;
 mod config;
 mod hotkey;
@@ -9,12 +8,151 @@ mod transcribe;
 mod tray;
 
 use anyhow::Result;
+use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let ipc_mode = args.contains(&"--ipc".to_string());
+
+    if ipc_mode {
+        run_ipc_mode()
+    } else {
+        run_standalone_mode()
+    }
+}
+
+/// IPC mode - communicates with Electron via JSON on stdin/stdout
+fn run_ipc_mode() -> Result<()> {
+    eprintln!("Flov IPC mode starting...");
+
+    // Load config
+    let config = config::Config::load()?;
+    eprintln!("Config loaded");
+
+    // Initialize components
+    let recorder = Arc::new(audio::AudioRecorder::new(config.audio.sample_rate)?);
+    let transcriber = Arc::new(transcribe::Transcriber::new(
+        &config.whisper.model_path,
+        config.whisper.language.clone(),
+    )?);
+
+    // Setup hotkey state
+    let hotkey_state = hotkey::HotkeyState::new();
+    let is_pressed = hotkey_state.is_pressed.clone();
+    let is_recording = hotkey_state.is_recording.clone();
+
+    // Install keyboard hook
+    let _hook = hotkey::install_hook(hotkey_state)?;
+    eprintln!("Hotkey hook installed (Ctrl+Win)");
+
+    // Spawn recording thread
+    let recorder_clone = recorder.clone();
+    let transcriber_clone = transcriber.clone();
+    let is_pressed_clone = is_pressed.clone();
+    let is_recording_clone = is_recording.clone();
+
+    std::thread::spawn(move || {
+        loop {
+            // Wait for hotkey press
+            while !is_pressed_clone.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            // Send recording started
+            send_json(&serde_json::json!({"type": "recording_started"}));
+
+            // Record while pressed, sending frequency spectrum
+            let is_pressed_for_record = is_pressed_clone.clone();
+
+            let samples = recorder_clone
+                .record_while_with_spectrum(
+                    move || is_pressed_for_record.load(Ordering::SeqCst),
+                    |spectrum| {
+                        send_json(&serde_json::json!({"type": "spectrum", "values": spectrum}));
+                    }
+                )
+                .unwrap_or_default();
+
+            // Send recording stopped
+            send_json(&serde_json::json!({"type": "recording_stopped"}));
+
+            // Reset recording state
+            is_recording_clone.store(false, Ordering::SeqCst);
+
+            if samples.len() < 1600 {
+                continue;
+            }
+
+            // Send transcribing status
+            send_json(&serde_json::json!({"type": "transcribing"}));
+
+            // Transcribe
+            let text = match transcriber_clone.transcribe(&samples) {
+                Ok(t) => t,
+                Err(e) => {
+                    send_json(&serde_json::json!({"type": "error", "message": e.to_string()}));
+                    continue;
+                }
+            };
+
+            if text.is_empty() {
+                continue;
+            }
+
+            // Send transcription result
+            send_json(&serde_json::json!({"type": "transcription", "text": text}));
+
+            // Insert text
+            input::type_text(&text);
+        }
+    });
+
+    // Read commands from stdin in a separate thread
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            if let Ok(line) = line {
+                if let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&line) {
+                    handle_command(&cmd);
+                }
+            }
+        }
+    });
+
+    // Message pump for keyboard hook (required for low-level hooks to work smoothly)
+    unsafe {
+        let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+        while windows::Win32::UI::WindowsAndMessaging::GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+            windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
+        }
+    }
+
+    Ok(())
+}
+
+fn send_json(value: &serde_json::Value) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{}", value);
+    let _ = stdout.flush();
+}
+
+fn handle_command(cmd: &serde_json::Value) {
+    match cmd.get("type").and_then(|t| t.as_str()) {
+        Some("ping") => {
+            send_json(&serde_json::json!({"type": "pong"}));
+        }
+        Some("quit") => {
+            std::process::exit(0);
+        }
+        _ => {}
+    }
+}
+
+/// Standalone mode - runs with tray icon, no IPC
+fn run_standalone_mode() -> Result<()> {
     // Setup logging to file
     let log_file = std::fs::File::create("flov.log").ok();
     if let Some(file) = log_file {
@@ -37,23 +175,11 @@ async fn main() -> Result<()> {
         config.whisper.language.clone(),
     )?);
 
-    // API client (optional)
-    let api_client = config.api.as_ref().map(|api_config| {
-        Arc::new(api::ApiClient::new(
-            api_config.endpoint.clone(),
-            api_config.key.clone(),
-            api_config.model.clone(),
-        ))
-    });
-
-    // GLM enabled flag (shared with tray)
-    let glm_enabled = Arc::new(AtomicBool::new(false));
-
     // Recording state flag (for tray icon updates in main thread)
     let is_recording_icon = Arc::new(AtomicBool::new(false));
 
-    // Create tray icon
-    let tray = tray::TrayManager::new(glm_enabled.clone())?;
+    // Create tray icon (without GLM)
+    let tray = tray::TrayManager::new_simple()?;
 
     // Setup hotkey state
     let hotkey_state = hotkey::HotkeyState::new();
@@ -64,8 +190,8 @@ async fn main() -> Result<()> {
     let _hook = hotkey::install_hook(hotkey_state)?;
     tracing::info!("Hotkey hook installed (Ctrl+Win)");
 
-    // Channel for processing results
-    let (tx, mut rx) = mpsc::channel::<(String, bool)>(1);
+    // Channel for transcription results
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
 
     // Spawn processing task
     let recorder_clone = recorder.clone();
@@ -73,7 +199,6 @@ async fn main() -> Result<()> {
     let is_pressed_clone = is_pressed.clone();
     let is_recording_clone = is_recording.clone();
     let is_recording_icon_clone = is_recording_icon.clone();
-    let glm_enabled_clone = glm_enabled.clone();
 
     std::thread::spawn(move || {
         loop {
@@ -94,7 +219,7 @@ async fn main() -> Result<()> {
             is_recording_icon_clone.store(false, Ordering::SeqCst);
             tracing::info!("Recording stopped, {} samples", samples.len());
 
-            // Reset recording state so hotkey can trigger again
+            // Reset recording state
             is_recording_clone.store(false, Ordering::SeqCst);
 
             if samples.len() < 1600 {
@@ -118,44 +243,16 @@ async fn main() -> Result<()> {
             }
 
             tracing::info!("Transcribed: {}", text);
-
-            let use_glm = glm_enabled_clone.load(Ordering::SeqCst);
-            let tx_clone = tx.clone();
-            let _ = tx_clone.blocking_send((text, use_glm));
+            let _ = tx.send(text);
         }
     });
 
     // Spawn text insertion task
-    let api_client_clone = api_client.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            while let Some((text, use_glm)) = rx.recv().await {
-                let final_text = if use_glm {
-                    if let Some(ref api) = api_client_clone {
-                        tracing::info!("Processing with GLM...");
-                        match api.improve_text(&text).await {
-                            Ok(improved) => {
-                                tracing::info!("GLM improved: {}", improved);
-                                improved
-                            }
-                            Err(e) => {
-                                tracing::error!("GLM error: {}", e);
-                                text
-                            }
-                        }
-                    } else {
-                        tracing::warn!("GLM enabled but no API config");
-                        text
-                    }
-                } else {
-                    text
-                };
-
-                tracing::info!("Inserting text: {}", final_text);
-                input::type_text(&final_text);
-            }
-        });
+        while let Ok(text) = rx.recv() {
+            tracing::info!("Inserting text: {}", text);
+            input::type_text(&text);
+        }
     });
 
     // Main message loop

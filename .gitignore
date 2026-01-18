@@ -1,6 +1,26 @@
+# Rust
 /target
-*.log
-*.zip
-models/
 Cargo.lock
+
+# Logs
+*.log
+
+# Archives
+*.zip
+
+# Whisper models (large files)
+models/
+
+# Config (contains local paths)
 flov.toml
+
+# Electron/Node
+ui/node_modules/
+ui/dist/
+ui/out/
+
+# Claude Code
+.claude/
+
+# CUDA DLLs
+*.dll

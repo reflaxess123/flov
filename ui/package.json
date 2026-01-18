@@ -1,0 +1,69 @@
+{
+  "name": "flov",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Flov voice-to-text assistant",
+  "author": "refla",
+  "main": "out/main/index.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"npm run build:main && wait-on http-get://127.0.0.1:5173 && cross-env ELECTRON_RENDERER_URL=http://127.0.0.1:5173 electron .\"",
+    "build:main": "esbuild src/main/index.ts --bundle --platform=node --outfile=out/main/index.cjs --external:electron && esbuild src/preload/index.ts --bundle --platform=node --outfile=out/preload/index.cjs --external:electron",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "com.flov.app",
+    "productName": "Flov",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../target/release/flov.exe",
+        "to": "flov.exe"
+      },
+      {
+        "from": "../target/release/flov.toml",
+        "to": "flov.toml"
+      },
+      {
+        "from": "../target/release/models",
+        "to": "models"
+      },
+      {
+        "from": "../target/release/*.dll",
+        "to": "."
+      }
+    ],
+    "win": {
+      "target": "portable",
+      "signAndEditExecutable": false
+    }
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.21.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.0",
+    "electron-vite": "^2.0.0",
+    "esbuild": "^0.27.2",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0",
+    "wait-on": "^9.0.3"
+  }
+}

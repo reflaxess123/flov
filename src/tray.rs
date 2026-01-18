@@ -1,26 +1,18 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tray_icon::{
-    menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem},
+    menu::{Menu, MenuEvent, MenuId, MenuItem},
     Icon, TrayIcon, TrayIconBuilder,
 };
 
 pub struct TrayManager {
     tray: TrayIcon,
     quit_id: MenuId,
-    glm_id: MenuId,
-    glm_enabled: Arc<AtomicBool>,
     red_icon: Icon,
     green_icon: Icon,
 }
 
 impl TrayManager {
-    pub fn new(glm_enabled: Arc<AtomicBool>) -> anyhow::Result<Self> {
+    pub fn new_simple() -> anyhow::Result<Self> {
         let menu = Menu::new();
-
-        let glm_item = CheckMenuItem::new("GLM обработка", true, false, None);
-        let glm_id = glm_item.id().clone();
-        menu.append(&glm_item)?;
 
         let quit_item = MenuItem::new("Выход", true, None);
         let quit_id = quit_item.id().clone();
@@ -38,8 +30,6 @@ impl TrayManager {
         Ok(Self {
             tray,
             quit_id,
-            glm_id,
-            glm_enabled,
             red_icon,
             green_icon,
         })
@@ -58,11 +48,6 @@ impl TrayManager {
         if let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.quit_id {
                 return true;
-            }
-            if event.id == self.glm_id {
-                let current = self.glm_enabled.load(Ordering::SeqCst);
-                self.glm_enabled.store(!current, Ordering::SeqCst);
-                tracing::info!("GLM processing: {}", !current);
             }
         }
         false

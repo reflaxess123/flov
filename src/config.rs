@@ -6,8 +6,6 @@ use std::path::PathBuf;
 pub struct Config {
     pub whisper: WhisperConfig,
     pub audio: AudioConfig,
-    #[serde(default)]
-    pub api: Option<ApiConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -21,13 +19,6 @@ pub struct WhisperConfig {
 pub struct AudioConfig {
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct ApiConfig {
-    pub endpoint: String,
-    pub key: String,
-    pub model: String,
 }
 
 fn default_sample_rate() -> u32 {
@@ -46,8 +37,13 @@ impl Config {
         let config_str = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read config from {:?}", config_path))?;
 
-        let config: Config = toml::from_str(&config_str)
+        let mut config: Config = toml::from_str(&config_str)
             .context("Failed to parse config")?;
+
+        // Resolve relative model path to exe directory
+        if config.whisper.model_path.is_relative() {
+            config.whisper.model_path = exe_dir.join(&config.whisper.model_path);
+        }
 
         Ok(config)
     }

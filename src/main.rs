@@ -4,6 +4,7 @@ mod audio;
 mod config;
 mod hotkey;
 mod input;
+mod llm;
 mod overlay;
 mod transcribe;
 mod tray;
@@ -27,6 +28,8 @@ fn main() -> Result<()> {
     // Load config
     let config = config::Config::load()?;
     tracing::info!("Config loaded, service URL: {}", config.service.url);
+    tracing::info!("LLM enabled: {}, URL: {}, model: {}",
+        config.llm.enabled, config.llm.url, config.llm.model);
 
     // Initialize audio recorder
     let recorder = Arc::new(audio::AudioRecorder::new(config.audio.sample_rate)?);
@@ -36,6 +39,23 @@ fn main() -> Result<()> {
     // Initialize transcriber (HTTP client)
     let transcriber = Arc::new(transcribe::Transcriber::new(&config.service.url)?);
     tracing::info!("Transcriber initialized");
+
+    // Initialize LLM text processor (optional)
+    let text_processor: Option<Arc<llm::TextProcessor>> = if config.llm.enabled {
+        match llm::TextProcessor::new(&config.llm.url, &config.llm.model) {
+            Ok(p) => {
+                tracing::info!("LLM text processor initialized");
+                Some(Arc::new(p))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize LLM processor: {}", e);
+                None
+            }
+        }
+    } else {
+        tracing::info!("LLM text processing disabled");
+        None
+    };
 
     // Create overlay state
     let overlay_state = overlay::OverlayState::new();
@@ -67,6 +87,7 @@ fn main() -> Result<()> {
     // Spawn processing task
     let recorder_clone = recorder.clone();
     let transcriber_clone = transcriber.clone();
+    let text_processor_clone = text_processor.clone();
     let is_pressed_clone = is_pressed.clone();
     let is_recording_clone = is_recording.clone();
     let is_recording_icon_clone = is_recording_icon.clone();
@@ -124,7 +145,7 @@ fn main() -> Result<()> {
             // Transcribe
             tracing::info!("Transcribing {} samples...", samples.len());
             let sample_rate = recorder_clone.sample_rate();
-            let text = match transcriber_clone.transcribe(&samples, sample_rate) {
+            let raw_text = match transcriber_clone.transcribe(&samples, sample_rate) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::error!("Transcription failed: {}", e);
@@ -133,15 +154,37 @@ fn main() -> Result<()> {
                 }
             };
 
-            overlay_loading_clone.store(false, Ordering::SeqCst);
-
-            if text.is_empty() {
+            if raw_text.is_empty() {
                 tracing::info!("Empty transcription, skipping");
+                overlay_loading_clone.store(false, Ordering::SeqCst);
                 continue;
             }
 
-            tracing::info!("Transcribed: {}", text);
-            let _ = tx.send(text);
+            tracing::info!("Raw transcription: {}", raw_text);
+
+            // Process with LLM if available
+            let final_text = if let Some(ref processor) = text_processor_clone {
+                match processor.process(&raw_text) {
+                    Ok(processed) => {
+                        tracing::info!("LLM processed: {}", processed);
+                        processed
+                    }
+                    Err(e) => {
+                        tracing::warn!("LLM processing failed, using raw text: {}", e);
+                        raw_text
+                    }
+                }
+            } else {
+                raw_text
+            };
+
+            overlay_loading_clone.store(false, Ordering::SeqCst);
+
+            if final_text.is_empty() {
+                continue;
+            }
+
+            let _ = tx.send(final_text);
         }
     });
 

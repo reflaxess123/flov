@@ -55,7 +55,7 @@ fn default_llm_url() -> String {
 }
 
 fn default_llm_model() -> String {
-    "gemma3:4b".to_string()
+    "gemma3:1b".to_string()
 }
 
 fn default_sample_rate() -> u32 {

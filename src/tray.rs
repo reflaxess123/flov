@@ -3,11 +3,21 @@ use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TrayState {
+    Idle,        // Red - waiting
+    Recording,   // Green - recording audio
+    Transcribing,// Yellow - transcription in progress
+    LlmProcessing,// Blue - LLM processing
+}
+
 pub struct TrayManager {
     tray: TrayIcon,
     quit_id: MenuId,
     red_icon: Icon,
     green_icon: Icon,
+    yellow_icon: Icon,
+    blue_icon: Icon,
 }
 
 impl TrayManager {
@@ -18,8 +28,10 @@ impl TrayManager {
         let quit_id = quit_item.id().clone();
         menu.append(&quit_item)?;
 
-        let red_icon = create_icon(220, 50, 50)?;
-        let green_icon = create_icon(50, 200, 50)?;
+        let red_icon = create_icon(220, 50, 50)?;      // Idle
+        let green_icon = create_icon(50, 200, 50)?;    // Recording
+        let yellow_icon = create_icon(230, 200, 50)?;  // Transcribing
+        let blue_icon = create_icon(50, 120, 220)?;    // LLM Processing
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -32,14 +44,17 @@ impl TrayManager {
             quit_id,
             red_icon,
             green_icon,
+            yellow_icon,
+            blue_icon,
         })
     }
 
-    pub fn set_recording(&self, recording: bool) {
-        let icon = if recording {
-            self.green_icon.clone()
-        } else {
-            self.red_icon.clone()
+    pub fn set_state(&self, state: TrayState) {
+        let icon = match state {
+            TrayState::Idle => self.red_icon.clone(),
+            TrayState::Recording => self.green_icon.clone(),
+            TrayState::Transcribing => self.yellow_icon.clone(),
+            TrayState::LlmProcessing => self.blue_icon.clone(),
         };
         let _ = self.tray.set_icon(Some(icon));
     }

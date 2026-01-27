@@ -15,6 +15,7 @@ impl Transcriber {
     pub fn new(url: &str) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
+            .no_proxy()  // Bypass system proxy for localhost
             .build()
             .context("Failed to create HTTP client")?;
 
@@ -62,7 +63,8 @@ impl Transcriber {
             .mime_str("audio/wav")?;
 
         let form = reqwest::blocking::multipart::Form::new()
-            .part("file", part);
+            .part("file", part)
+            .text("language", "ru");
 
         tracing::info!("Sending audio to transcription service: {}", self.url);
 

@@ -10,7 +10,7 @@ mod transcribe;
 mod tray;
 
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 fn main() -> Result<()> {
@@ -65,8 +65,8 @@ fn main() -> Result<()> {
     let cursor_x = overlay_state.cursor_x.clone();
     let cursor_y = overlay_state.cursor_y.clone();
 
-    // Recording state flag (for tray icon updates)
-    let is_recording_icon = Arc::new(AtomicBool::new(false));
+    // Tray state for icon updates
+    let tray_state = Arc::new(std::sync::Mutex::new(tray::TrayState::Idle));
 
     // Create tray icon
     let tray = tray::TrayManager::new_simple()?;
@@ -90,7 +90,7 @@ fn main() -> Result<()> {
     let text_processor_clone = text_processor.clone();
     let is_pressed_clone = is_pressed.clone();
     let is_recording_clone = is_recording.clone();
-    let is_recording_icon_clone = is_recording_icon.clone();
+    let tray_state_clone = tray_state.clone();
     let spectrum_clone = spectrum.clone();
     let overlay_visible_clone = overlay_visible.clone();
     let overlay_loading_clone = overlay_loading.clone();
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
             }
 
             tracing::info!("Recording started");
-            is_recording_icon_clone.store(true, Ordering::SeqCst);
+            *tray_state_clone.lock().unwrap() = tray::TrayState::Recording;
             overlay_visible_clone.store(true, Ordering::SeqCst);
 
             // Get cursor position at start of recording
@@ -128,7 +128,6 @@ fn main() -> Result<()> {
                 .unwrap_or_default();
 
             overlay_visible_clone.store(false, Ordering::SeqCst);
-            is_recording_icon_clone.store(false, Ordering::SeqCst);
             tracing::info!("Recording stopped, {} samples", samples.len());
 
             // Reset recording state
@@ -136,20 +135,22 @@ fn main() -> Result<()> {
 
             if samples.len() < 1600 {
                 tracing::info!("Too short, skipping");
+                *tray_state_clone.lock().unwrap() = tray::TrayState::Idle;
                 continue;
             }
 
-            // Show loading state
+            // Show loading state and yellow icon for transcription
             overlay_loading_clone.store(true, Ordering::SeqCst);
+            *tray_state_clone.lock().unwrap() = tray::TrayState::Transcribing;
 
-            // Transcribe
+            // Transcribe (samples are always resampled to 16000 Hz)
             tracing::info!("Transcribing {} samples...", samples.len());
-            let sample_rate = recorder_clone.sample_rate();
-            let raw_text = match transcriber_clone.transcribe(&samples, sample_rate) {
+            let raw_text = match transcriber_clone.transcribe(&samples, 16000) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::error!("Transcription failed: {}", e);
                     overlay_loading_clone.store(false, Ordering::SeqCst);
+                    *tray_state_clone.lock().unwrap() = tray::TrayState::Idle;
                     continue;
                 }
             };
@@ -157,6 +158,7 @@ fn main() -> Result<()> {
             if raw_text.is_empty() {
                 tracing::info!("Empty transcription, skipping");
                 overlay_loading_clone.store(false, Ordering::SeqCst);
+                *tray_state_clone.lock().unwrap() = tray::TrayState::Idle;
                 continue;
             }
 
@@ -164,6 +166,8 @@ fn main() -> Result<()> {
 
             // Process with LLM if available
             let final_text = if let Some(ref processor) = text_processor_clone {
+                // Set blue icon for LLM processing
+                *tray_state_clone.lock().unwrap() = tray::TrayState::LlmProcessing;
                 match processor.process(&raw_text) {
                     Ok(processed) => {
                         tracing::info!("LLM processed: {}", processed);
@@ -179,6 +183,7 @@ fn main() -> Result<()> {
             };
 
             overlay_loading_clone.store(false, Ordering::SeqCst);
+            *tray_state_clone.lock().unwrap() = tray::TrayState::Idle;
 
             if final_text.is_empty() {
                 continue;
@@ -214,7 +219,7 @@ fn main() -> Result<()> {
     // Main message loop with tray
     tracing::info!("Flov running. Press Ctrl+Win to record.");
 
-    let mut last_recording_state = false;
+    let mut last_tray_state = tray::TrayState::Idle;
 
     unsafe {
         let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
@@ -232,11 +237,11 @@ fn main() -> Result<()> {
                 windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
             }
 
-            // Update tray icon based on recording state
-            let current_recording = is_recording_icon.load(Ordering::SeqCst);
-            if current_recording != last_recording_state {
-                tray.set_recording(current_recording);
-                last_recording_state = current_recording;
+            // Update tray icon based on current state
+            let current_state = *tray_state.lock().unwrap();
+            if current_state != last_tray_state {
+                tray.set_state(current_state);
+                last_tray_state = current_state;
             }
 
             if tray.check_events() {

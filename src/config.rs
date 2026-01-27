@@ -1,24 +1,27 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    pub whisper: WhisperConfig,
+    pub service: ServiceConfig,
+    #[serde(default)]
     pub audio: AudioConfig,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct WhisperConfig {
-    pub model_path: PathBuf,
-    #[serde(default)]
-    pub language: Option<String>,
+pub struct ServiceConfig {
+    #[serde(default = "default_url")]
+    pub url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct AudioConfig {
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
+}
+
+fn default_url() -> String {
+    "http://localhost:8877/transcribe".to_string()
 }
 
 fn default_sample_rate() -> u32 {
@@ -34,16 +37,22 @@ impl Config {
             .to_path_buf();
 
         let config_path = exe_dir.join("flov.toml");
+
+        // If no config exists, use defaults
+        if !config_path.exists() {
+            return Ok(Config {
+                service: ServiceConfig {
+                    url: default_url(),
+                },
+                audio: AudioConfig::default(),
+            });
+        }
+
         let config_str = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read config from {:?}", config_path))?;
 
-        let mut config: Config = toml::from_str(&config_str)
+        let config: Config = toml::from_str(&config_str)
             .context("Failed to parse config")?;
-
-        // Resolve relative model path to exe directory
-        if config.whisper.model_path.is_relative() {
-            config.whisper.model_path = exe_dir.join(&config.whisper.model_path);
-        }
 
         Ok(config)
     }

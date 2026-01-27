@@ -1,77 +1,89 @@
 use anyhow::{Context, Result};
-use std::path::PathBuf;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct TranscribeResponse {
+    text: String,
+}
 
 pub struct Transcriber {
-    model_path: PathBuf,
-    language: Option<String>,
+    url: String,
+    client: reqwest::blocking::Client,
 }
 
 impl Transcriber {
-    pub fn new(model_path: &std::path::Path, language: Option<String>) -> Result<Self> {
-        // Just store the path, don't load the model yet
-        if !model_path.exists() {
-            anyhow::bail!("Model file not found: {:?}", model_path);
-        }
-
-        tracing::info!("Whisper model path: {:?}", model_path);
+    pub fn new(url: &str) -> Result<Self> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .context("Failed to create HTTP client")?;
 
         Ok(Self {
-            model_path: model_path.to_path_buf(),
-            language,
+            url: url.to_string(),
+            client,
         })
     }
 
-    pub fn transcribe(&self, samples: &[f32]) -> Result<String> {
-        // Load model
-        tracing::info!("Loading whisper model...");
-        let load_start = std::time::Instant::now();
+    pub fn transcribe(&self, samples: &[f32], sample_rate: u32) -> Result<String> {
+        // Create temp WAV file
+        let temp_file = tempfile::Builder::new()
+            .suffix(".wav")
+            .tempfile()
+            .context("Failed to create temp file")?;
 
-        let ctx = WhisperContext::new_with_params(
-            self.model_path.to_str().context("Invalid model path")?,
-            WhisperContextParameters::default(),
-        )
-        .context("Failed to load whisper model")?;
+        let path = temp_file.path().to_path_buf();
 
-        tracing::info!("Model loaded in {:?}", load_start.elapsed());
+        // Write WAV
+        {
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
 
-        // Create state and transcribe
-        let mut state = ctx.create_state().context("Failed to create state")?;
+            let mut writer = hound::WavWriter::create(&path, spec)
+                .context("Failed to create WAV writer")?;
 
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-
-        // Speed optimizations
-        params.set_n_threads(num_cpus::get() as i32);
-        params.set_translate(false);
-        params.set_no_context(true);
-        params.set_single_segment(true);
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-
-        if let Some(ref lang) = &self.language {
-            params.set_language(Some(lang));
-        }
-
-        let transcribe_start = std::time::Instant::now();
-        state
-            .full(params, samples)
-            .context("Failed to transcribe")?;
-        tracing::info!("Transcription took {:?}", transcribe_start.elapsed());
-
-        let num_segments = state.full_n_segments().context("Failed to get segments")?;
-
-        let mut text = String::new();
-        for i in 0..num_segments {
-            if let Ok(segment) = state.full_get_segment_text(i) {
-                text.push_str(&segment);
+            for &sample in samples {
+                let sample_i16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                writer.write_sample(sample_i16)?;
             }
+
+            writer.finalize()?;
         }
 
-        // Model is dropped here, freeing memory
-        tracing::info!("Model unloaded");
+        // Send to transcription service
+        let file_bytes = std::fs::read(&path)
+            .context("Failed to read temp WAV file")?;
 
-        Ok(text.trim().to_string())
+        let part = reqwest::blocking::multipart::Part::bytes(file_bytes)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")?;
+
+        let form = reqwest::blocking::multipart::Form::new()
+            .part("file", part);
+
+        tracing::info!("Sending audio to transcription service: {}", self.url);
+
+        let response = self.client
+            .post(&self.url)
+            .multipart(form)
+            .send()
+            .context("Failed to send request to transcription service")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            anyhow::bail!("Transcription service returned {}: {}", status, body);
+        }
+
+        let result: TranscribeResponse = response
+            .json()
+            .context("Failed to parse transcription response")?;
+
+        tracing::info!("Transcription result: {}", result.text.trim());
+
+        Ok(result.text.trim().to_string())
     }
 }

@@ -8,19 +8,15 @@ Cargo.lock
 # Archives
 *.zip
 
-# Whisper models (large files)
-models/
-
-# Config (contains local paths)
+# Config (contains local settings)
 flov.toml
 
-# Electron/Node
-ui/node_modules/
-ui/dist/
-ui/out/
+# Models (legacy, if any)
+models/
 
 # Claude Code
 .claude/
 
-# CUDA DLLs
-*.dll
+# Web panel (if added later)
+web/node_modules/
+web/dist/

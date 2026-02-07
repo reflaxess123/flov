@@ -1,22 +1,6 @@
-# Rust
 /target
-Cargo.lock
-
-# Logs
 *.log
-
-# Archives
 *.zip
-
-# Config (contains local settings)
+*.bin
 flov.toml
-
-# Models (legacy, if any)
-models/
-
-# Claude Code
 .claude/
-
-# Web panel (if added later)
-web/node_modules/
-web/dist/

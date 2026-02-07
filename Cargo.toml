@@ -7,15 +7,14 @@ edition = "2021"
 # Audio recording via WASAPI
 cpal = "0.15"
 
-# Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+# Whisper for transcription (uses whisper.cpp with CUDA)
+whisper-rs = { version = "0.15", features = ["cuda"] }
 
-# HTTP client (for transcription service)
-reqwest = { version = "0.12", features = ["json", "multipart", "blocking"] }
+# CPU info
+num_cpus = "1"
 
-# JSON
+# Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 
 # Config
 toml = "0.8"
@@ -25,12 +24,8 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_System_LibraryLoader",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
-    "Win32_Graphics_Gdi",
-    "Win32_System_Threading",
-    "Win32_System_Console",
 ] }
 
 # Tray icon
@@ -49,12 +44,6 @@ tracing-subscriber = "0.3"
 # Overlay UI
 eframe = "0.31"
 egui = "0.31"
-
-# Temp file for audio
-tempfile = "3"
-
-# WAV encoding
-hound = "3"
 
 [profile.release]
 opt-level = 3

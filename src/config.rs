@@ -1,39 +1,34 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    pub service: ServiceConfig,
     #[serde(default)]
-    pub llm: LlmConfig,
+    pub whisper: WhisperConfig,
     #[serde(default)]
     pub audio: AudioConfig,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ServiceConfig {
-    #[serde(default = "default_url")]
-    pub url: String,
+pub struct WhisperConfig {
+    #[serde(default = "default_model_path")]
+    pub model_path: PathBuf,
+    #[serde(default = "default_language")]
+    pub language: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct LlmConfig {
-    #[serde(default = "default_llm_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_llm_url")]
-    pub url: String,
-    #[serde(default = "default_llm_model")]
-    pub model: String,
-}
-
-impl Default for LlmConfig {
+impl Default for WhisperConfig {
     fn default() -> Self {
         Self {
-            enabled: default_llm_enabled(),
-            url: default_llm_url(),
-            model: default_llm_model(),
+            model_path: default_model_path(),
+            language: default_language(),
         }
     }
+}
+
+fn default_language() -> String {
+    "ru".to_string()
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -42,20 +37,12 @@ pub struct AudioConfig {
     pub sample_rate: u32,
 }
 
-fn default_url() -> String {
-    "http://localhost:8877/transcribe".to_string()
-}
-
-fn default_llm_enabled() -> bool {
-    true
-}
-
-fn default_llm_url() -> String {
-    "http://localhost:11435/api/generate".to_string()
-}
-
-fn default_llm_model() -> String {
-    "gemma3:1b".to_string()
+fn default_model_path() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default();
+    exe_dir.join("ggml-large-v3-turbo.bin")
 }
 
 fn default_sample_rate() -> u32 {
@@ -72,13 +59,9 @@ impl Config {
 
         let config_path = exe_dir.join("flov.toml");
 
-        // If no config exists, use defaults
         if !config_path.exists() {
             return Ok(Config {
-                service: ServiceConfig {
-                    url: default_url(),
-                },
-                llm: LlmConfig::default(),
+                whisper: WhisperConfig::default(),
                 audio: AudioConfig::default(),
             });
         }
@@ -86,8 +69,13 @@ impl Config {
         let config_str = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read config from {:?}", config_path))?;
 
-        let config: Config = toml::from_str(&config_str)
+        let mut config: Config = toml::from_str(&config_str)
             .context("Failed to parse config")?;
+
+        // Resolve relative model_path against exe directory
+        if config.whisper.model_path.is_relative() {
+            config.whisper.model_path = exe_dir.join(&config.whisper.model_path);
+        }
 
         Ok(config)
     }

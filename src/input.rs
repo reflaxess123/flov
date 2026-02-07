@@ -37,7 +37,7 @@ fn set_clipboard(text: &str) -> bool {
         }
 
         std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr as *mut u16, wide.len());
-        GlobalUnlock(hmem);
+        let _ = GlobalUnlock(hmem);
 
         // CF_UNICODETEXT = 13
         let result = SetClipboardData(13, Some(HANDLE(hmem.0)));

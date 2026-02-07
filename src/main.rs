@@ -4,7 +4,6 @@ mod audio;
 mod config;
 mod hotkey;
 mod input;
-mod llm;
 mod overlay;
 mod transcribe;
 mod tray;
@@ -27,35 +26,18 @@ fn main() -> Result<()> {
 
     // Load config
     let config = config::Config::load()?;
-    tracing::info!("Config loaded, service URL: {}", config.service.url);
-    tracing::info!("LLM enabled: {}, URL: {}, model: {}",
-        config.llm.enabled, config.llm.url, config.llm.model);
+    tracing::info!("Config loaded, model: {:?}", config.whisper.model_path);
 
     // Initialize audio recorder
     let recorder = Arc::new(audio::AudioRecorder::new(config.audio.sample_rate)?);
-    let sample_rate = recorder.sample_rate();
-    tracing::info!("Audio recorder initialized, sample rate: {}", sample_rate);
+    tracing::info!("Audio recorder initialized");
 
-    // Initialize transcriber (HTTP client)
-    let transcriber = Arc::new(transcribe::Transcriber::new(&config.service.url)?);
+    // Initialize transcriber (local whisper model)
+    let transcriber = Arc::new(transcribe::Transcriber::new(
+        &config.whisper.model_path,
+        config.whisper.language,
+    )?);
     tracing::info!("Transcriber initialized");
-
-    // Initialize LLM text processor (optional)
-    let text_processor: Option<Arc<llm::TextProcessor>> = if config.llm.enabled {
-        match llm::TextProcessor::new(&config.llm.url, &config.llm.model) {
-            Ok(p) => {
-                tracing::info!("LLM text processor initialized");
-                Some(Arc::new(p))
-            }
-            Err(e) => {
-                tracing::warn!("Failed to initialize LLM processor: {}", e);
-                None
-            }
-        }
-    } else {
-        tracing::info!("LLM text processing disabled");
-        None
-    };
 
     // Create overlay state
     let overlay_state = overlay::OverlayState::new();
@@ -87,7 +69,6 @@ fn main() -> Result<()> {
     // Spawn processing task
     let recorder_clone = recorder.clone();
     let transcriber_clone = transcriber.clone();
-    let text_processor_clone = text_processor.clone();
     let is_pressed_clone = is_pressed.clone();
     let is_recording_clone = is_recording.clone();
     let tray_state_clone = tray_state.clone();
@@ -143,9 +124,9 @@ fn main() -> Result<()> {
             overlay_loading_clone.store(true, Ordering::SeqCst);
             *tray_state_clone.lock().unwrap() = tray::TrayState::Transcribing;
 
-            // Transcribe (samples are always resampled to 16000 Hz)
+            // Transcribe (samples are already resampled to 16000 Hz)
             tracing::info!("Transcribing {} samples...", samples.len());
-            let raw_text = match transcriber_clone.transcribe(&samples, 16000) {
+            let raw_text = match transcriber_clone.transcribe(&samples) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::error!("Transcription failed: {}", e);
@@ -162,34 +143,12 @@ fn main() -> Result<()> {
                 continue;
             }
 
-            tracing::info!("Raw transcription: {}", raw_text);
-
-            // Process with LLM if available
-            let final_text = if let Some(ref processor) = text_processor_clone {
-                // Set blue icon for LLM processing
-                *tray_state_clone.lock().unwrap() = tray::TrayState::LlmProcessing;
-                match processor.process(&raw_text) {
-                    Ok(processed) => {
-                        tracing::info!("LLM processed: {}", processed);
-                        processed
-                    }
-                    Err(e) => {
-                        tracing::warn!("LLM processing failed, using raw text: {}", e);
-                        raw_text
-                    }
-                }
-            } else {
-                raw_text
-            };
+            tracing::info!("Transcription: {}", raw_text);
 
             overlay_loading_clone.store(false, Ordering::SeqCst);
             *tray_state_clone.lock().unwrap() = tray::TrayState::Idle;
 
-            if final_text.is_empty() {
-                continue;
-            }
-
-            let _ = tx.send(final_text);
+            let _ = tx.send(raw_text);
         }
     });
 

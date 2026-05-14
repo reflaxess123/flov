@@ -229,5 +229,10 @@
     display: grid;
     grid-template-rows: auto auto auto minmax(0, 1fr);
   }
-  .pp-zone {}
+  /* pp-zone needs `overflow: visible` so the mic dropdown can pop out
+     past the column edge. The form inside has its own overflow-y so
+     long content still scrolls correctly. */
+  .pp-zone {
+    overflow: visible;
+  }
 </style>

@@ -8,12 +8,47 @@ pub struct AudioRecorder {
     config: cpal::SupportedStreamConfig,
 }
 
+/// Enumerate currently-connected input devices by name (whatever cpal /
+/// WASAPI reports). Cheap to call but order can drift between calls if
+/// the user (un)plugs hardware — UI should re-fetch on demand.
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    match host.input_devices() {
+        Ok(iter) => iter.filter_map(|d| d.name().ok()).collect(),
+        Err(e) => {
+            tracing::warn!("input_devices enumeration failed: {}", e);
+            Vec::new()
+        }
+    }
+}
+
 impl AudioRecorder {
-    pub fn new(_target_sample_rate: u32) -> Result<Self> {
+    pub fn new(_target_sample_rate: u32, preferred_device: Option<&str>) -> Result<Self> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .context("No input device available")?;
+        let device = match preferred_device.and_then(|s| if s.is_empty() { None } else { Some(s) }) {
+            Some(name) => {
+                let found = host
+                    .input_devices()
+                    .ok()
+                    .and_then(|mut iter| {
+                        iter.find(|d| d.name().ok().as_deref() == Some(name))
+                    });
+                match found {
+                    Some(d) => d,
+                    None => {
+                        tracing::warn!(
+                            "preferred input '{}' not found, falling back to default",
+                            name
+                        );
+                        host.default_input_device()
+                            .context("No input device available")?
+                    }
+                }
+            }
+            None => host
+                .default_input_device()
+                .context("No input device available")?,
+        };
 
         tracing::info!("Using input device: {}", device.name().unwrap_or_default());
 

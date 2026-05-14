@@ -39,8 +39,10 @@ pub fn run() {
     tracing::info!("flov starting (Tauri)");
 
     let cfg = config::Config::load().expect("config load failed");
-    let recorder = Arc::new(audio::AudioRecorder::new(cfg.audio.sample_rate)
-        .expect("audio init failed"));
+    let recorder = Arc::new(
+        audio::AudioRecorder::new(cfg.audio.sample_rate, cfg.audio.device.as_deref())
+            .expect("audio init failed"),
+    );
 
     // Shared mutable backend + model — written by the tray/Models window,
     // read by the Transcriber on every transcribe() call so a switch takes
@@ -101,6 +103,7 @@ pub fn run() {
     tracing::info!("hotkey: {}", initial_def.combo);
     hotkey::set_hotkey_def(initial_def);
     let hotkey_combo = Arc::new(Mutex::new(cfg.hotkey.combo.clone()));
+    let audio_device = Arc::new(Mutex::new(cfg.audio.device.clone()));
 
     let app_state = state_cmd::AppState {
         backend_choice: backend_choice.clone(),
@@ -109,6 +112,7 @@ pub fn run() {
         post_processor: post_processor.clone(),
         pp_settings: pp_settings.clone(),
         hotkey_combo: hotkey_combo.clone(),
+        audio_device: audio_device.clone(),
         stats: stats.clone(),
     };
 
@@ -185,6 +189,8 @@ pub fn run() {
             state_cmd::set_postprocess_config,
             state_cmd::get_hotkey,
             state_cmd::set_hotkey,
+            state_cmd::list_audio_inputs,
+            state_cmd::set_audio_input,
             state_cmd::get_stats,
         ])
         .run(tauri::generate_context!())

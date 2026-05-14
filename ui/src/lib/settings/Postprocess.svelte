@@ -44,6 +44,54 @@
     hotkey = v.combo;
   }
 
+  // ─── Microphone ────────────────────────────────────────────────────────
+  // Backend list_audio_inputs queries cpal each call so unplugging /
+  // plugging shows up after a tab refocus. Selection persists to
+  // flov.toml and only takes effect on next launch (recorder owns the
+  // open stream).
+  type MicState = { devices: string[]; selected: string | null };
+  let mics = $state<MicState>({ devices: [], selected: null });
+  let micValue = $derived(mics.selected ?? "");
+
+  async function refreshMics() {
+    try {
+      const v = await invoke<MicState>("list_audio_inputs");
+      mics = v;
+    } catch (e) {
+      console.error("list_audio_inputs failed", e);
+    }
+  }
+  async function pickMic(value: string) {
+    const next = value.trim() === "" ? null : value;
+    try {
+      await invoke("set_audio_input", { device: next });
+      mics = { ...mics, selected: next };
+    } catch (e) {
+      alert(String(e));
+    }
+  }
+
+  let micOpen = $state(false);
+  let micWrapEl: HTMLElement | undefined = $state();
+  $effect(() => {
+    if (!micOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (micWrapEl && !micWrapEl.contains(e.target as Node)) micOpen = false;
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") micOpen = false; };
+    // capture phase so we close before any other handler reacts
+    document.addEventListener("mousedown", onClick, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onClick, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  });
+  function chooseMic(value: string) {
+    pickMic(value);
+    micOpen = false;
+  }
+
   function startCapture() {
     capturing = true;
     preview = "";
@@ -153,11 +201,116 @@
   onMount(() => {
     refresh();
     refreshHotkey();
+    refreshMics();
     return () => { if (capturing) cancelCapture(); };
   });
 </script>
 
 <div class="form" data-tauri-no-drag>
+  <!-- Hotkey at the top so the most-frequently-tweaked binding is in
+       the user's eye-line, not buried below the prompt. -->
+  <div class="hotkey-row top">
+    <div class="left">
+      <span class="icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="6" width="20" height="12" rx="2"/>
+          <path d="M6 10h0M10 10h0M14 10h0M18 10h0M7 14h10"/>
+        </svg>
+      </span>
+      <div class="text">
+        <span class="label">Hotkey</span>
+        <span class="sub">
+          {#if capturing}
+            Press your combo · Esc to cancel
+          {:else}
+            Hold to record, release to transcribe
+          {/if}
+        </span>
+      </div>
+    </div>
+    {#if capturing}
+      <span class="combo capturing">{preview || "…"}</span>
+    {:else}
+      <span class="combo">{hotkey}</span>
+    {/if}
+    <button class="change-btn" onclick={capturing ? cancelCapture : startCapture}>
+      {capturing ? "Cancel" : "Change"}
+    </button>
+  </div>
+
+  <!-- Microphone dropdown — change applies on next launch (recorder
+       owns the open WASAPI stream and is created at startup). -->
+  <div class="mic-row">
+    <div class="left">
+      <span class="icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+          <path d="M19 11a7 7 0 0 1-14 0"/>
+          <line x1="12" y1="18" x2="12" y2="22"/>
+          <line x1="8" y1="22" x2="16" y2="22"/>
+        </svg>
+      </span>
+      <div class="text">
+        <span class="label">Microphone</span>
+        <span class="sub">
+          {#if mics.devices.length === 0}
+            No inputs detected
+          {:else}
+            Restart flov after changing
+          {/if}
+        </span>
+      </div>
+    </div>
+    <div class="mic-dd" bind:this={micWrapEl}>
+      <button
+        type="button"
+        class="mic-trigger"
+        class:open={micOpen}
+        onclick={() => (micOpen = !micOpen)}
+        disabled={mics.devices.length === 0}
+        aria-haspopup="listbox"
+        aria-expanded={micOpen}
+      >
+        <span class="mic-value">{micValue || "System default"}</span>
+        <svg class="chev" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+      {#if micOpen}
+        <ul class="mic-menu" role="listbox">
+          <li>
+            <button
+              type="button"
+              class="mic-opt"
+              class:active={micValue === ""}
+              onclick={() => chooseMic("")}
+            >
+              System default
+              {#if micValue === ""}
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              {/if}
+            </button>
+          </li>
+          {#each mics.devices as d (d)}
+            <li>
+              <button
+                type="button"
+                class="mic-opt"
+                class:active={d === micValue}
+                onclick={() => chooseMic(d)}
+              >
+                <span class="mic-opt-name">{d}</span>
+                {#if d === micValue}
+                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                {/if}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+  </div>
+
   <div class="row toggle-row">
     <div class="left">
       <span class="icon" aria-hidden="true">
@@ -236,35 +389,6 @@
       </button>
     </div>
   </div>
-
-  <div class="hotkey-row">
-    <div class="left">
-      <span class="icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="6" width="20" height="12" rx="2"/>
-          <path d="M6 10h0M10 10h0M14 10h0M18 10h0M7 14h10"/>
-        </svg>
-      </span>
-      <div class="text">
-        <span class="label">Hotkey</span>
-        <span class="sub">
-          {#if capturing}
-            Press your combo · Esc to cancel
-          {:else}
-            Hold to record, release to transcribe
-          {/if}
-        </span>
-      </div>
-    </div>
-    {#if capturing}
-      <span class="combo capturing">{preview || "…"}</span>
-    {:else}
-      <span class="combo">{hotkey}</span>
-    {/if}
-    <button class="change-btn" onclick={capturing ? cancelCapture : startCapture}>
-      {capturing ? "Cancel" : "Change"}
-    </button>
-  </div>
 </div>
 
 <style>
@@ -274,9 +398,10 @@
     gap: var(--space-12);
     flex: 1 1 auto;
     min-height: 0;
-    overflow-y: auto;
-    padding-right: 4px;
-    margin-right: -4px;
+    /* Visible so the mic dropdown popup can extend past the form
+       bounds. The form's natural sizing keeps everything in view
+       without needing scroll. */
+    overflow: visible;
   }
 
   .toggle-row {
@@ -384,13 +509,131 @@
     box-shadow: none;
   }
 
-  /* ===== Hotkey row ===== */
+  /* ===== Hotkey row =====
+     `.top` variant for the moved-to-top placement: no `padding-top`
+     border separator; sits flush with the form's natural gap. */
   .hotkey-row {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: var(--space-12);
     padding-top: var(--space-12);
+  }
+  .hotkey-row.top {
+    padding-top: 0;
+  }
+
+  /* ===== Microphone row ===== */
+  .mic-row {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-12);
+  }
+  .mic-row .left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-12);
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+  /* ===== Custom mic dropdown =====
+     Native <select> looked OS-foreign so we render our own. The trigger
+     mirrors `.combo` / `.change-btn` styling — flat surface chip with a
+     chevron — and the menu pops absolutely-positioned underneath. */
+  .mic-dd {
+    position: relative;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 60%;
+  }
+  .mic-trigger {
+    appearance: none;
+    width: 100%;
+    background: var(--surface);
+    border: none;
+    color: var(--fg);
+    font: 600 var(--text-xs) / 1 inherit;
+    padding: 8px 10px 8px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: background-color 0.15s var(--ease-out);
+  }
+  .mic-trigger:hover:not(:disabled) { background-color: var(--hover); }
+  .mic-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+  .mic-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+  }
+  .chev {
+    flex-shrink: 0;
+    color: var(--muted);
+    transition: transform 0.18s var(--ease-out);
+  }
+  .mic-trigger.open .chev { transform: rotate(180deg); color: var(--fg); }
+
+  .mic-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    /* width: max-content lets the menu grow to fit the longest device
+       name; min-width keeps it at least as wide as the trigger;
+       max-width prevents it from running off the window edge.
+       Anchored to `right: 0` so it grows to the LEFT, since the
+       trigger sits on the right edge of the row. */
+    width: max-content;
+    min-width: 100%;
+    max-width: 360px;
+    z-index: 50;
+    list-style: none;
+    margin: 0;
+    padding: 4px;
+    background: var(--bg-elevated);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-card);
+    max-height: 240px;
+    overflow-y: auto;
+    /* Subtle pop-in so the menu doesn't just snap. */
+    animation: ddIn 0.16s var(--ease-out);
+  }
+  @keyframes ddIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .mic-menu li { display: block; }
+  .mic-opt {
+    appearance: none;
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--fg);
+    font: 500 var(--text-xs) / 1.3 inherit;
+    text-align: left;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    transition: background-color 0.12s var(--ease-out);
+  }
+  .mic-opt:hover { background: var(--hover); }
+  .mic-opt.active { background: var(--accent); color: var(--accent-fg); }
+  .mic-opt.active:hover { background: var(--accent); }
+  .mic-opt-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .hotkey-row .left {
     display: flex;
@@ -403,12 +646,17 @@
     font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", SFMono-Regular, Menlo, monospace;
     font-size: 12px;
     font-weight: 600;
+    line-height: 1;
     color: var(--fg);
     background: var(--surface);
-    padding: 6px 10px;
+    /* Match `.change-btn` padding so the chip and the button line up
+       on the baseline (combo used to sit ~2px shorter). */
+    padding: 8px 12px;
     border-radius: var(--radius-sm);
     letter-spacing: 0.2px;
     flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
   }
   .combo.capturing {
     color: var(--accent);
@@ -425,7 +673,7 @@
     background: var(--surface);
     color: var(--fg);
     font: 600 var(--text-xs) / 1 inherit;
-    padding: 7px 12px;
+    padding: 8px 12px;
     border-radius: var(--radius-sm);
     cursor: pointer;
     transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out);

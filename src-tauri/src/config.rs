@@ -70,10 +70,15 @@ fn default_language() -> String {
     "ru".to_string()
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct AudioConfig {
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
+    /// Preferred input device name as reported by cpal. `None` (or empty
+    /// string in toml) → use the system default. Mismatched names fall
+    /// back to default with a warning.
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +190,12 @@ impl Config {
     /// Updates `[hotkey].combo` in flov.toml.
     pub fn write_hotkey_combo(combo: &str) -> Result<()> {
         write_field(&["hotkey", "combo"], combo)
+    }
+
+    /// Updates `[audio].device` in flov.toml. Empty string means
+    /// "system default".
+    pub fn write_audio_device(device: &str) -> Result<()> {
+        write_field(&["audio", "device"], device)
     }
 }
 

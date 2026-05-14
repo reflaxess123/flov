@@ -22,6 +22,10 @@ pub struct AppState {
     pub pp_settings: Arc<Mutex<PostprocessSettings>>,
     /// Current key combo string for the global hotkey (e.g. "Ctrl+Win").
     pub hotkey_combo: Arc<Mutex<String>>,
+    /// Selected microphone (cpal device name). `None` → system default.
+    /// Changing this only takes effect on the next launch — the running
+    /// AudioRecorder holds the open stream and is not re-created.
+    pub audio_device: Arc<Mutex<Option<String>>>,
     pub stats: Arc<Stats>,
 }
 
@@ -159,6 +163,36 @@ pub fn set_hotkey(combo: String, state: State<AppState>) -> Result<(), String> {
     crate::hotkey::set_hotkey_def(def);
     *state.hotkey_combo.lock().unwrap() = combo.clone();
     tracing::info!("hotkey changed to {}", combo);
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct AudioInputsView {
+    /// Currently-connected input device names from cpal/WASAPI.
+    pub devices: Vec<String>,
+    /// Saved choice; `None` means "use system default".
+    pub selected: Option<String>,
+}
+
+#[tauri::command]
+pub fn list_audio_inputs(state: State<AppState>) -> AudioInputsView {
+    AudioInputsView {
+        devices: crate::audio::list_input_devices(),
+        selected: state.audio_device.lock().unwrap().clone(),
+    }
+}
+
+#[tauri::command]
+pub fn set_audio_input(device: Option<String>, state: State<AppState>) -> Result<(), String> {
+    // Empty / null = revert to system default.
+    let cleaned = device.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    });
+    crate::config::Config::write_audio_device(cleaned.as_deref().unwrap_or(""))
+        .map_err(|e| e.to_string())?;
+    *state.audio_device.lock().unwrap() = cleaned.clone();
+    tracing::info!("audio device selected: {:?} (takes effect after restart)", cleaned);
     Ok(())
 }
 

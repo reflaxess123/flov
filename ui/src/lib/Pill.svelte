@@ -35,6 +35,11 @@
   // Recording shows several interweaving lines; processing collapses to
   // one bold accent line.
   const lineCount = $derived(status === "recording" ? 3 : 1);
+  // Recording: half of the AudioWave's internal LINE_SPEEDS.
+  // Transcribing: 1/10th — the slow "thinking" pace from before.
+  const speedScale = $derived(
+    status === "recording" ? 0.5 : status === "transcribing" ? 0.1 : 0.5,
+  );
 
   // Spring-ish overshoot for the bubble pop — the "вжух".
   function backOut(t: number): number {
@@ -108,7 +113,7 @@
 
 {#if status !== "idle"}
   <div class="pill" class:processing={status === "transcribing"} transition:morphPill>
-    <AudioWave amplitude={targetAmp} lines={lineCount} reveal={revealAmount} />
+    <AudioWave amplitude={targetAmp} lines={lineCount} reveal={revealAmount} {speedScale} />
   </div>
 {/if}
 

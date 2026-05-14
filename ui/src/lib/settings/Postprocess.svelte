@@ -409,8 +409,6 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-12);
-    padding-bottom: var(--space-12);
-    border-bottom: 1px solid var(--border);
   }
   .left {
     display: flex;

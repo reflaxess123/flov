@@ -70,7 +70,7 @@ fn default_language() -> String {
     "ru".to_string()
 }
 
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AudioConfig {
     #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
@@ -79,6 +79,21 @@ pub struct AudioConfig {
     /// back to default with a warning.
     #[serde(default)]
     pub device: Option<String>,
+}
+
+// Manual Default — the previous `derive(Default)` returned
+// `sample_rate: 0`, which only matters when there's no flov.toml on
+// disk (fresh installer). With sample_rate=0 the recording_loop did
+// `samples.len() as f64 / 0`, producing +∞ which serde_json then
+// serialized as `null` for stats.json. Defaulting to 16 kHz here
+// matches `default_sample_rate()` and fixes the null seconds bug.
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: default_sample_rate(),
+            device: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -159,13 +159,31 @@ Vulkan build требует LunarG SDK: `winget install KhronosGroup.VulkanSDK`,
 
 ## Дистрибуция
 
+### NSIS installer (`scripts/build-bundle.ps1`)
+
+Скрипт строит single-file `flov_<version>_x64-setup.exe`:
+- `.\scripts\build-bundle.ps1` — CPU + Vulkan (zero deps на машине user'a)
+- `.\scripts\build-bundle.ps1 -IncludeCuda` — добавляет CUDA sidecar
+  и cublas DLLs (требует CUDA toolkit при сборке, NVIDIA driver у юзера)
+
+Tauri требует sidecar бинари с triple-суффиксом
+(`flov-whisper-cpu-x86_64-pc-windows-msvc.exe`) в
+`src-tauri/binaries/`. Скрипт это стейджит автоматически из
+`target/release/`. Cublas DLLs идут в `binaries/runtime/` и
+конфигурируются через `bundle.resources` в `tauri.conf.json`.
+
+Whisper модель (~1.6 GB) НЕ в installer — пользователь скачает её
+через Settings → Models после установки.
+
+### Manual layout (без installer)
+
 Минимум для CUDA-варианта:
 ```
-flov.exe
+flov_app.exe
 flov-whisper-cuda.exe
 cublas64_13.dll
 cublasLt64_13.dll
-ggml-large-v3-turbo.bin     # модель ~1.6 GB (или скачивается через Settings)
+ggml-large-v3-turbo.bin     # или скачивается через Settings
 icons/tray.png
 flov.toml                    # опционален — Settings создаст
 ```

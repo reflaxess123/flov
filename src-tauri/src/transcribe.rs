@@ -42,6 +42,12 @@ fn exe_dir() -> Result<PathBuf> {
 
 /// Names of backends whose sidecar binary exists next to flov.exe right now.
 /// Used by the tray menu to grey-out unavailable choices.
+///
+/// CUDA also needs the NVIDIA driver runtime — `nvcuda.dll` ships with the
+/// NVIDIA display driver and lives in `System32`. Without it the sidecar
+/// would crash on startup, so we hide CUDA on machines where it's missing
+/// (Intel-only laptops, AMD GPUs with no NVIDIA hardware, etc.) instead
+/// of letting the user pick a backend that can't possibly work.
 pub fn available_backends() -> Vec<String> {
     let dir = match exe_dir() {
         Ok(d) => d,
@@ -50,9 +56,21 @@ pub fn available_backends() -> Vec<String> {
     BACKEND_PRIORITY
         .iter()
         .filter(|b| dir.join(backend_bin_name(b)).exists())
+        .filter(|b| !(**b == "cuda") || cuda_runtime_present())
         .map(|b| (*b).to_string())
         .collect()
 }
+
+#[cfg(target_os = "windows")]
+fn cuda_runtime_present() -> bool {
+    let sys = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    sys.join(r"System32\nvcuda.dll").exists()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cuda_runtime_present() -> bool { false }
 
 pub struct Transcriber {
     model_path: Arc<Mutex<PathBuf>>,
@@ -76,6 +94,13 @@ impl Transcriber {
             language,
             backend_choice,
         })
+    }
+
+    /// Lightweight pre-flight: does the configured model file exist on
+    /// disk right now? Used before starting a recording so we can show
+    /// "no model" before the user wastes a sentence into the void.
+    pub fn has_model(&self) -> bool {
+        self.model_path.lock().unwrap().exists()
     }
 
     pub fn transcribe(&self, samples: &[f32]) -> Result<String> {

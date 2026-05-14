@@ -34,9 +34,25 @@ Vulkan — LunarG SDK.
 .\scripts\build-sidecars.ps1                  # все backend'ы
 .\scripts\build-sidecars.ps1 -Backend cuda    # один
 
-# Релиз
+# Релиз (просто main app)
 .\ui\node_modules\.bin\tauri.cmd build
 ```
+
+## Bundle для релиза
+
+Один скрипт собирает NSIS installer со всеми sidecar'ами внутри:
+
+```powershell
+# CPU + Vulkan (нет внешних зависимостей у пользователя)
+.\scripts\build-bundle.ps1
+
+# + CUDA (требует CUDA toolkit на машине сборки, тащит cublas DLLs)
+.\scripts\build-bundle.ps1 -IncludeCuda
+```
+
+На выходе: `target/release/bundle/nsis/flov_<version>_x64-setup.exe` —
+single-file installer. Whisper модель (~1.6 GB) НЕ внутри installer —
+пользователь скачивает её через Settings → Models после установки.
 
 Подробности по архитектуре — [CLAUDE.md](CLAUDE.md). По sidecar'ам и
 добавлению Mac/Metal — [crates/README.md](crates/README.md).

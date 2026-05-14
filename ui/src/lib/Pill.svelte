@@ -1,10 +1,15 @@
 <script lang="ts">
   import AudioWave from "./AudioWave.svelte";
 
-  type State = "idle" | "recording" | "transcribing" | "polished";
-  type Props = { status: State; spectrum: number[]; polishedText?: string };
+  type State = "idle" | "recording" | "transcribing" | "polished" | "error";
+  type Props = {
+    status: State;
+    spectrum: number[];
+    polishedText?: string;
+    errorText?: string;
+  };
 
-  let { status, spectrum }: Props = $props();
+  let { status, spectrum, errorText = "" }: Props = $props();
 
   const audioAmp = $derived.by(() => {
     if (!spectrum || spectrum.length === 0) return 0;
@@ -112,8 +117,17 @@
 </script>
 
 {#if status !== "idle"}
-  <div class="pill" class:processing={status === "transcribing"} transition:morphPill>
-    <AudioWave amplitude={targetAmp} lines={lineCount} reveal={revealAmount} {speedScale} />
+  <div
+    class="pill"
+    class:processing={status === "transcribing"}
+    class:error={status === "error"}
+    transition:morphPill
+  >
+    {#if status === "error"}
+      <span class="err-text">{errorText}</span>
+    {:else}
+      <AudioWave amplitude={targetAmp} lines={lineCount} reveal={revealAmount} {speedScale} />
+    {/if}
   </div>
 {/if}
 
@@ -156,4 +170,18 @@
     }
   }
   .pill.processing { color: var(--pill-accent); }
+  /* Error state — red text-only pill so the user can read the message
+     instead of seeing the wave shrink mysteriously. */
+  .pill.error {
+    color: #ef4444;
+    padding: 0 16px;
+    min-width: max-content;
+  }
+  .err-text {
+    font-size: 12px;
+    font-weight: 600;
+    color: #ef4444;
+    white-space: nowrap;
+    letter-spacing: -0.1px;
+  }
 </style>

@@ -47,7 +47,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "publisher": "puzix",
+    "shortDescription": "Voice-to-text via local Whisper",
+    "longDescription": "Push-to-talk voice transcription. Hold the hotkey, speak, release — text is pasted into the active field.",
+    "category": "Productivity",
+    "copyright": "Copyright (c) 2026 puzix",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -55,9 +60,22 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "externalBin": [
+      "binaries/flov-whisper-cpu",
+      "binaries/flov-whisper-vulkan"
+    ],
+    "resources": [
+      "binaries/runtime/*"
+    ],
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "installerHooks": "./installer-hooks.nsh"
       }
     }
   }

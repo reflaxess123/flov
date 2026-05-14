@@ -215,7 +215,27 @@ fn recording_loop(
         }
 
         tracing::info!("recording start");
-        let _ = active_mode.load(Ordering::SeqCst);
+
+        // Pre-flight: no model → don't even start recording. Show the
+        // error pill at the cursor and wait for the user to release the
+        // hotkey before going idle (otherwise the moment they release
+        // the loop would try again instantly).
+        let model_present = transcriber.has_model();
+        if !model_present {
+            if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "windows")]
+                ui::position_at_cursor_monitor(&window);
+                let _ = window.show();
+            }
+            let _ = app.emit("transcribe-error", "Скачай модель: Settings → Models");
+            tracing::warn!("hotkey pressed but no model is configured");
+            is_recording.store(false, Ordering::SeqCst);
+            // Drain the held hotkey so we don't immediately re-fire.
+            while active_mode.load(Ordering::SeqCst) != hotkey::MODE_IDLE {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            continue;
+        }
 
         // Reposition pill on the monitor of the cursor at recording-start.
         // Show the window only after positioning to avoid a flash on the
@@ -259,7 +279,12 @@ fn recording_loop(
             Ok(t) => t,
             Err(e) => {
                 tracing::error!("transcribe failed: {}", e);
-                emit_state(&app, UiState::Idle);
+                let msg = if e.to_string().contains("model file not found") {
+                    "Скачай модель: Settings → Models".to_string()
+                } else {
+                    format!("Transcribe error: {}", e)
+                };
+                let _ = app.emit("transcribe-error", &msg);
                 tray::set_state(&app, tray::TrayState::Idle);
                 continue;
             }
@@ -277,6 +302,9 @@ fn recording_loop(
         let chars = raw_text.chars().count() as u64;
         let seconds = samples.len() as f64 / sample_rate as f64;
         stats.record(chars, seconds);
+        // Push update to any open Settings window so its counters and
+        // heatmap reflect immediately, without polling.
+        let _ = app.emit("stats-updated", ());
 
         // Snapshot the current PostProcessor (Settings UI may have swapped
         // it). We keep the Arc only for this iteration.

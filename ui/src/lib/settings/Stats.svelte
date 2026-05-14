@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
 
   type DayStats = { recordings: number; chars: number; seconds: number };
   type StatsFile = {
@@ -117,10 +118,13 @@
   async function refresh() {
     stats = await invoke<StatsFile>("get_stats");
   }
+  // Push-driven: backend emits `stats-updated` after every recording so
+  // we refresh exactly once per change instead of polling. Initial
+  // fetch on mount picks up whatever is already on disk.
   onMount(() => {
     refresh();
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
+    const off = listen("stats-updated", () => { refresh(); });
+    return () => { off.then((u) => u()); };
   });
 </script>
 

@@ -75,6 +75,7 @@ pub fn download_model(
         guard.push(id.clone());
     }
     let in_flight = state.in_flight.clone();
+    let model_path_state = state.model_path.clone();
 
     std::thread::spawn(move || {
         let result = run_download(&id, &url, &dest, expected_size, &app);
@@ -92,6 +93,30 @@ pub fn download_model(
             );
         } else {
             tracing::info!("download {} complete", id);
+
+            // If this is the only model on disk, auto-activate it so the
+            // user can immediately start dictating without going back to
+            // the picker. Skip if they already have a different active
+            // model — they presumably know what they want.
+            let downloaded_now: Vec<_> = models::list(None)
+                .into_iter()
+                .filter(|m| m.downloaded)
+                .collect();
+            let already_active_path = model_path_state.lock().unwrap().clone();
+            let already_active_exists = already_active_path.exists();
+            if downloaded_now.len() == 1 || !already_active_exists {
+                if let Ok(path) = models::entry_local_path(&id) {
+                    if path.exists() {
+                        *model_path_state.lock().unwrap() = path.clone();
+                        if let Err(e) = crate::config::Config::write_model_path(&path) {
+                            tracing::warn!("auto-activate write_model_path failed: {}", e);
+                        } else {
+                            tracing::info!("auto-activated newly downloaded model {}", id);
+                        }
+                    }
+                }
+            }
+
             let _ = app.emit(
                 "model-progress",
                 ProgressEvent {

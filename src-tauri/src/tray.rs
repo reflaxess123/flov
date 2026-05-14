@@ -84,28 +84,28 @@ pub fn load_themed_icon_for_window() -> Image<'static> {
     load_themed_icon(windows_uses_dark_theme())
 }
 
-/// Loads tray.png and (if dark theme) inverts its RGB channels so the dark
-/// glyph becomes light. Falls back to a flat dark square if the file is
-/// missing or undecodeable.
-fn load_themed_icon(dark_theme: bool) -> Image<'static> {
-    let candidate = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.join("icons/tray.png")));
+/// PNG bytes baked into the binary at compile time. Earlier versions
+/// looked the icon up next to the exe at runtime, but the bundle/install
+/// step doesn't ship icons/tray.png, so packaged builds saw a fallback
+/// solid square. Embedding sidesteps that entirely.
+const TRAY_PNG: &[u8] = include_bytes!("../icons/tray.png");
 
-    if let Some(path) = candidate {
-        if let Ok(img) = image::open(&path) {
-            let mut rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            if dark_theme {
-                for px in rgba.pixels_mut() {
-                    px[0] = 255 - px[0];
-                    px[1] = 255 - px[1];
-                    px[2] = 255 - px[2];
-                    // alpha untouched
-                }
+/// Decodes the embedded tray PNG and (on dark theme) inverts its RGB
+/// channels so the dark glyph reads as light. Falls back to a flat
+/// themed square only if the PNG is somehow undecodeable.
+fn load_themed_icon(dark_theme: bool) -> Image<'static> {
+    if let Ok(img) = image::load_from_memory(TRAY_PNG) {
+        let mut rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        if dark_theme {
+            for px in rgba.pixels_mut() {
+                px[0] = 255 - px[0];
+                px[1] = 255 - px[1];
+                px[2] = 255 - px[2];
+                // alpha untouched
             }
-            return Image::new_owned(rgba.into_raw(), w, h);
         }
+        return Image::new_owned(rgba.into_raw(), w, h);
     }
 
     const SIZE: u32 = 32;

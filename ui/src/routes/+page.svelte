@@ -4,11 +4,12 @@
   import { invoke } from "@tauri-apps/api/core";
   import Pill from "$lib/Pill.svelte";
 
-  type State = "idle" | "recording" | "transcribing" | "polished";
+  type State = "idle" | "recording" | "transcribing" | "polished" | "error";
 
   const BAR_COUNT = 20;
   let state = $state<State>("idle");
   let polishedText = $state<string>("");
+  let errorText = $state<string>("");
   let spectrum = $state<number[]>(Array(BAR_COUNT).fill(0));
 
   onMount(() => {
@@ -42,6 +43,15 @@
       listen<string>("polished-text", (e) => {
         polishedText = e.payload;
       }),
+      listen<string>("transcribe-error", (e) => {
+        errorText = e.payload;
+        state = "error";
+        // Hold the error on screen long enough to read, then morph out.
+        setTimeout(() => {
+          state = "idle";
+          setTimeout(() => invoke("hide_window").catch(console.error), 520);
+        }, 3500);
+      }),
     ];
     return () => {
       unlisteners.forEach((p) => p.then((u) => u()));
@@ -50,7 +60,7 @@
 </script>
 
 <div class="stage">
-  <Pill status={state} {spectrum} {polishedText} />
+  <Pill status={state} {spectrum} {polishedText} {errorText} />
 </div>
 
 <style>

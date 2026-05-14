@@ -15,6 +15,7 @@ use std::time::SystemTime;
 pub struct DayStats {
     pub recordings: u64,
     pub chars: u64,
+    #[serde(default, deserialize_with = "deser_finite_f64")]
     pub seconds: f64,
 }
 
@@ -22,9 +23,24 @@ pub struct DayStats {
 pub struct StatsFile {
     pub total_recordings: u64,
     pub total_chars: u64,
+    #[serde(default, deserialize_with = "deser_finite_f64")]
     pub total_seconds: f64,
     /// `YYYY-MM-DD` → counts. BTreeMap so JSON dumps sorted.
     pub by_day: BTreeMap<String, DayStats>,
+}
+
+/// Treats JSON `null` (which serde_json writes when a f64 is NaN/±Inf —
+/// see the AudioConfig::default sample_rate=0 bug) as 0.0 so we don't
+/// throw away the entire stats.json on the first read after the fix.
+fn deser_finite_f64<'de, D>(d: D) -> std::result::Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Option<f64> = serde::Deserialize::deserialize(d).unwrap_or(Some(0.0));
+    Ok(match v {
+        Some(x) if x.is_finite() => x,
+        _ => 0.0,
+    })
 }
 
 pub struct Stats {

@@ -3,14 +3,18 @@ pub mod audio;
 pub mod config;
 pub mod hotkey;
 pub mod input;
+pub mod models;
+pub mod models_cmd;
 pub mod postprocess;
+pub mod state_cmd;
+pub mod stats;
 pub mod transcribe;
 
 mod tray;
 mod ui;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager};
 
@@ -37,31 +41,84 @@ pub fn run() {
     let cfg = config::Config::load().expect("config load failed");
     let recorder = Arc::new(audio::AudioRecorder::new(cfg.audio.sample_rate)
         .expect("audio init failed"));
-    let transcriber = Arc::new(
-        transcribe::Transcriber::new(&cfg.whisper.model_path, cfg.whisper.language.clone())
-            .expect("whisper init failed (check model_path in flov.toml)")
+
+    // Shared mutable backend + model — written by the tray/Models window,
+    // read by the Transcriber on every transcribe() call so a switch takes
+    // effect on the next press of Ctrl+Win, no restart required.
+    let backend_choice = Arc::new(Mutex::new(cfg.backend.choice.clone()));
+    let model_path = Arc::new(Mutex::new(cfg.whisper.model_path.clone()));
+    let available_backends = transcribe::available_backends();
+    tracing::info!(
+        "available backends: {:?}; configured choice: {}",
+        available_backends,
+        cfg.backend.choice
     );
 
-    let postprocess_available = !cfg.openrouter.api_key.is_empty();
-    let post_processor = if postprocess_available {
+    let transcriber = Arc::new(
+        transcribe::Transcriber::new(
+            model_path.clone(),
+            cfg.whisper.language.clone(),
+            backend_choice.clone(),
+        )
+        .expect("whisper init failed")
+    );
+
+    let model_state = models_cmd::ModelState {
+        model_path: model_path.clone(),
+        in_flight: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    let initial_pp = if cfg.openrouter.api_key.is_empty() {
+        None
+    } else {
         Some(Arc::new(postprocess::PostProcessor::new(
             cfg.openrouter.api_key.clone(),
             cfg.openrouter.model.clone(),
             cfg.openrouter.system_prompt.clone(),
-            cfg.openrouter.reply_system_prompt.clone(),
         )))
-    } else {
-        None
     };
+    let post_processor = Arc::new(Mutex::new(initial_pp));
+    let pp_settings = Arc::new(Mutex::new(state_cmd::PostprocessSettings {
+        api_key: cfg.openrouter.api_key.clone(),
+        model: cfg.openrouter.model.clone(),
+        system_prompt: cfg.openrouter.system_prompt.clone(),
+    }));
     let postprocess_enabled = Arc::new(AtomicBool::new(false));
+
+    let stats = Arc::new(stats::Stats::open().expect("stats open failed"));
 
     let hotkey_state = hotkey::HotkeyState::new();
     let active_mode = hotkey_state.active_mode.clone();
     let is_recording = hotkey_state.is_recording.clone();
     let _hook = hotkey::install_hook(hotkey_state).expect("hotkey hook failed");
 
+    // Set the initial hotkey definition; Tauri command can swap it later.
+    let initial_def = hotkey::HotkeyDef::parse(&cfg.hotkey.combo)
+        .unwrap_or_else(|e| {
+            tracing::warn!("invalid hotkey '{}': {}, falling back to Ctrl+Win", cfg.hotkey.combo, e);
+            hotkey::HotkeyDef::parse("Ctrl+Win").unwrap()
+        });
+    tracing::info!("hotkey: {}", initial_def.combo);
+    hotkey::set_hotkey_def(initial_def);
+    let hotkey_combo = Arc::new(Mutex::new(cfg.hotkey.combo.clone()));
+
+    let app_state = state_cmd::AppState {
+        backend_choice: backend_choice.clone(),
+        available_backends: available_backends.clone(),
+        postprocess_enabled: postprocess_enabled.clone(),
+        post_processor: post_processor.clone(),
+        pp_settings: pp_settings.clone(),
+        hotkey_combo: hotkey_combo.clone(),
+        stats: stats.clone(),
+    };
+
+    let stats_for_loop = stats.clone();
+    let sample_rate_for_loop = cfg.audio.sample_rate;
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(model_state)
+        .manage(app_state)
         .setup(move |app| {
             let app_handle = app.handle().clone();
             let window = app.get_webview_window("main").expect("main window missing");
@@ -72,7 +129,17 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             ui::force_click_through(&window);
 
-            tray::setup(&app_handle, postprocess_available, postprocess_enabled.clone())?;
+            // Re-use the tray PNG as the Settings window's title-bar /
+            // taskbar icon so the app has a consistent brand without us
+            // needing a separate .ico.
+            if let Some(settings) = app.get_webview_window("settings") {
+                let icon = tray::load_themed_icon_for_window();
+                let _ = settings.set_icon(icon);
+                #[cfg(target_os = "windows")]
+                ui::disable_native_window_rounding(&settings);
+            }
+
+            tray::setup(&app_handle)?;
 
             // Spawn the recording orchestration thread; it owns the recorder
             // loop and emits state/amplitude events to the webview.
@@ -82,7 +149,9 @@ pub fn run() {
             let is_recording = is_recording.clone();
             let post_processor = post_processor.clone();
             let postprocess_enabled = postprocess_enabled.clone();
+            let stats = stats_for_loop.clone();
             let app_for_thread = app_handle.clone();
+            let sample_rate = sample_rate_for_loop;
 
             std::thread::spawn(move || {
                 recording_loop(
@@ -93,12 +162,31 @@ pub fn run() {
                     is_recording,
                     post_processor,
                     postprocess_enabled,
+                    stats,
+                    sample_rate,
                 );
             });
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![ui::polished_shown, ui::hide_window])
+        .invoke_handler(tauri::generate_handler![
+            ui::polished_shown,
+            ui::hide_window,
+            models_cmd::list_models,
+            models_cmd::download_model,
+            models_cmd::delete_model,
+            models_cmd::set_active_model,
+            models_cmd::show_models_window,
+            state_cmd::get_backend_state,
+            state_cmd::set_backend_choice,
+            state_cmd::get_postprocess_state,
+            state_cmd::set_postprocess_enabled,
+            state_cmd::get_postprocess_config,
+            state_cmd::set_postprocess_config,
+            state_cmd::get_hotkey,
+            state_cmd::set_hotkey,
+            state_cmd::get_stats,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -109,8 +197,10 @@ fn recording_loop(
     transcriber: Arc<transcribe::Transcriber>,
     active_mode: Arc<std::sync::atomic::AtomicU8>,
     is_recording: Arc<AtomicBool>,
-    post_processor: Option<Arc<postprocess::PostProcessor>>,
+    post_processor: Arc<Mutex<Option<Arc<postprocess::PostProcessor>>>>,
     postprocess_enabled: Arc<AtomicBool>,
+    stats: Arc<stats::Stats>,
+    sample_rate: u32,
 ) {
     loop {
         // Idle until a hotkey arms us
@@ -118,15 +208,8 @@ fn recording_loop(
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        let mode = active_mode.load(Ordering::SeqCst);
-        tracing::info!("recording start (mode={})", mode);
-
-        // For reply mode, snapshot clipboard before we start
-        let clipboard_context = if mode == hotkey::MODE_REPLY {
-            input::get_clipboard()
-        } else {
-            None
-        };
+        tracing::info!("recording start");
+        let _ = active_mode.load(Ordering::SeqCst);
 
         // Reposition pill on the monitor of the cursor at recording-start.
         // Show the window only after positioning to avoid a flash on the
@@ -182,38 +265,42 @@ fn recording_loop(
         }
         tracing::info!("transcript: {}", raw_text);
 
-        // Mode → final text
-        let final_text = match mode {
-            hotkey::MODE_REPLY => {
-                if let Some(p) = post_processor.as_ref() {
-                    let ctx = clipboard_context.as_deref().unwrap_or("");
-                    p.reply(ctx, &raw_text).unwrap_or(raw_text)
-                } else {
-                    raw_text
-                }
-            }
-            _ => {
-                if postprocess_enabled.load(Ordering::SeqCst) {
-                    if let Some(p) = post_processor.as_ref() {
-                        match p.process(&raw_text) {
-                            Ok(t) => t,
-                            Err(_) => raw_text,
-                        }
-                    } else {
+        // Stats: count this recording. `chars` is char count of the raw
+        // transcript (before postprocess); seconds is derived from the
+        // captured sample count and the recorder's native rate.
+        let chars = raw_text.chars().count() as u64;
+        let seconds = samples.len() as f64 / sample_rate as f64;
+        stats.record(chars, seconds);
+
+        // Snapshot the current PostProcessor (Settings UI may have swapped
+        // it). We keep the Arc only for this iteration.
+        let pp_snapshot: Option<Arc<postprocess::PostProcessor>> =
+            post_processor.lock().unwrap().clone();
+
+        let final_text = if postprocess_enabled.load(Ordering::SeqCst) {
+            if let Some(p) = pp_snapshot.as_ref() {
+                match p.process(&raw_text) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!(
+                            "postprocess failed, falling back to raw transcript: {:#}",
+                            e
+                        );
                         raw_text
                     }
-                } else {
-                    raw_text
                 }
+            } else {
+                tracing::warn!("postprocess enabled but no API key configured");
+                raw_text
             }
+        } else {
+            raw_text
         };
 
         // Polished pill is only meaningful when AI transformed the text.
         // Without postprocess we skip the show — paste straight away.
-        let used_postprocess = match mode {
-            hotkey::MODE_REPLY => post_processor.is_some(),
-            _ => postprocess_enabled.load(Ordering::SeqCst) && post_processor.is_some(),
-        };
+        let used_postprocess =
+            postprocess_enabled.load(Ordering::SeqCst) && pp_snapshot.is_some();
 
         if used_postprocess {
             // Hand off to frontend, which fires `polished-shown` after its

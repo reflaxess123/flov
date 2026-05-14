@@ -1,10 +1,9 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-/// Active mode: 0 = idle, 1 = Ctrl+Win (transcribe), 2 = Ctrl+Alt (reply)
+/// Active mode: 0 = idle, 1 = recording (the hotkey is held).
 pub const MODE_IDLE: u8 = 0;
 pub const MODE_TRANSCRIBE: u8 = 1;
-pub const MODE_REPLY: u8 = 2;
 
 pub struct HotkeyState {
     pub active_mode: Arc<AtomicU8>,
@@ -17,6 +16,96 @@ impl HotkeyState {
             active_mode: Arc::new(AtomicU8::new(MODE_IDLE)),
             is_recording: Arc::new(AtomicBool::new(false)),
         }
+    }
+}
+
+/// Parsed hotkey definition. The combo's last token is the trigger key
+/// (whose KEYDOWN starts recording / KEYUP stops it). All earlier tokens
+/// must be held at trigger time.
+#[derive(Debug, Clone, Default)]
+pub struct HotkeyDef {
+    /// Virtual-key codes that must be held (use the `_LEFT`/`_RIGHT`-agnostic
+    /// VK constants, e.g. VK_CONTROL, so GetAsyncKeyState matches either).
+    pub modifier_vks: Vec<u16>,
+    /// Virtual-key codes that fire the trigger (any of them counts).
+    pub trigger_vks: Vec<u16>,
+    /// Original combo string, kept so the UI / config can read it back.
+    pub combo: String,
+}
+
+impl HotkeyDef {
+    /// Parse "Ctrl+Win" / "Ctrl+Alt+Space" / "Ctrl+Shift+K" etc.
+    pub fn parse(combo: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = combo
+            .split('+')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return Err("empty hotkey combo".into());
+        }
+        let trigger_token = *parts.last().unwrap();
+        let modifier_tokens = &parts[..parts.len() - 1];
+
+        let mut modifier_vks = Vec::new();
+        for m in modifier_tokens {
+            modifier_vks.extend(modifier_vk_codes(m).ok_or_else(|| {
+                format!("unknown modifier '{}' in '{}'", m, combo)
+            })?);
+        }
+
+        let trigger_vks = trigger_vk_codes(trigger_token)
+            .ok_or_else(|| format!("unknown key '{}' in '{}'", trigger_token, combo))?;
+
+        Ok(Self {
+            modifier_vks,
+            trigger_vks,
+            combo: combo.to_string(),
+        })
+    }
+}
+
+#[allow(dead_code)] // Linux build doesn't use these but the parser needs the table
+fn modifier_vk_codes(token: &str) -> Option<Vec<u16>> {
+    // We use the "either left or right" composite VKs (VK_CONTROL = 0x11 etc.)
+    // — GetAsyncKeyState handles both sides.
+    match token.to_ascii_lowercase().as_str() {
+        "ctrl" | "control" => Some(vec![0x11]),  // VK_CONTROL
+        "alt" | "menu"     => Some(vec![0x12]),  // VK_MENU
+        "shift"            => Some(vec![0x10]),  // VK_SHIFT
+        "win" | "meta" | "super" | "cmd" => Some(vec![0x5B, 0x5C]), // VK_LWIN, VK_RWIN
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+fn trigger_vk_codes(token: &str) -> Option<Vec<u16>> {
+    // Trigger keys can be any modifier OR a regular key — we normalise here.
+    if let Some(mods) = modifier_vk_codes(token) {
+        return Some(match token.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => vec![0xA2, 0xA3], // L+R Control
+            "alt" | "menu"     => vec![0xA4, 0xA5], // L+R Menu
+            "shift"            => vec![0xA0, 0xA1], // L+R Shift
+            _ => mods, // win — already L+R
+        });
+    }
+    let lower = token.to_ascii_lowercase();
+    match lower.as_str() {
+        "space" => Some(vec![0x20]),
+        "enter" | "return" => Some(vec![0x0D]),
+        "tab" => Some(vec![0x09]),
+        "esc" | "escape" => Some(vec![0x1B]),
+        "backspace" => Some(vec![0x08]),
+        "delete" | "del" => Some(vec![0x2E]),
+        s if s.len() == 1 => {
+            let c = s.chars().next().unwrap().to_ascii_uppercase();
+            if c.is_ascii_alphanumeric() {
+                Some(vec![c as u16])
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -37,52 +126,54 @@ mod windows_impl {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
-    const VK_LWIN: u16 = 0x5B;
-    const VK_RWIN: u16 = 0x5C;
-    const VK_LMENU: u16 = 0xA4;
-    const VK_RMENU: u16 = 0xA5;
-
     static mut HOOK_STATE: Option<HotkeyState> = None;
+    /// Active hotkey definition. Updated live by the Tauri command — the
+    /// hook callback re-reads it on every keystroke so changes apply
+    /// immediately, no re-registration needed.
+    static HOOK_DEF: Mutex<Option<HotkeyDef>> = Mutex::new(None);
+
+    pub fn set_hotkey_def(def: HotkeyDef) {
+        *HOOK_DEF.lock().unwrap() = Some(def);
+    }
+
+    fn modifier_held(vk: u16) -> bool {
+        unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
+    }
 
     unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 {
             let kb = *(lparam.0 as *const KBDLLHOOKSTRUCT);
             let vk = kb.vkCode as u16;
+            let evt = wparam.0 as u32;
 
-            let ctrl_pressed = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
-            let win_pressed = vk == VK_LWIN || vk == VK_RWIN;
-            let alt_pressed = vk == VK_LMENU || vk == VK_RMENU;
-
-            if let Some(ref state) = HOOK_STATE {
-                match wparam.0 as u32 {
-                    WM_KEYDOWN | WM_SYSKEYDOWN => {
-                        if ctrl_pressed && !state.is_recording.load(Ordering::SeqCst) {
-                            if win_pressed {
+            let def_opt = HOOK_DEF.lock().unwrap().clone();
+            if let (Some(def), Some(state)) = (def_opt, &HOOK_STATE) {
+                let is_trigger = def.trigger_vks.contains(&vk);
+                if is_trigger {
+                    match evt {
+                        WM_KEYDOWN | WM_SYSKEYDOWN => {
+                            let all_held = def
+                                .modifier_vks
+                                .iter()
+                                .all(|&m| modifier_held(m));
+                            if all_held && !state.is_recording.load(Ordering::SeqCst) {
                                 state.active_mode.store(MODE_TRANSCRIBE, Ordering::SeqCst);
                                 state.is_recording.store(true, Ordering::SeqCst);
-                                return LRESULT(1);
-                            }
-                            if alt_pressed {
-                                state.active_mode.store(MODE_REPLY, Ordering::SeqCst);
-                                state.is_recording.store(true, Ordering::SeqCst);
+                                // Swallow so e.g. Win doesn't open Start menu,
+                                // Space doesn't insert a space, etc.
                                 return LRESULT(1);
                             }
                         }
-                    }
-                    WM_KEYUP | WM_SYSKEYUP => {
-                        let mode = state.active_mode.load(Ordering::SeqCst);
-                        if win_pressed && mode == MODE_TRANSCRIBE {
-                            state.active_mode.store(MODE_IDLE, Ordering::SeqCst);
+                        WM_KEYUP | WM_SYSKEYUP => {
+                            if state.active_mode.load(Ordering::SeqCst) == MODE_TRANSCRIBE {
+                                state.active_mode.store(MODE_IDLE, Ordering::SeqCst);
+                            }
                         }
-                        if alt_pressed && mode == MODE_REPLY {
-                            state.active_mode.store(MODE_IDLE, Ordering::SeqCst);
-                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
-
         CallNextHookEx(None, code, wparam, lparam)
     }
 
@@ -122,6 +213,10 @@ mod linux_impl {
         }
         keyboards
     }
+
+    /// Linux doesn't yet honour the configurable hotkey — it stays on
+    /// Ctrl+Super (the original combo). Wire it up if/when we ship Linux.
+    pub fn set_hotkey_def(_def: HotkeyDef) {}
 
     pub fn install_hook(state: HotkeyState) -> anyhow::Result<HookGuard> {
         let active_mode = state.active_mode.clone();
@@ -168,21 +263,6 @@ mod linux_impl {
                                                     }
                                                 }
                                             }
-                                            Key::KEY_LEFTALT | Key::KEY_RIGHTALT => {
-                                                if value == 1 {
-                                                    if ctrl.load(Ordering::SeqCst)
-                                                        && !recording.load(Ordering::SeqCst)
-                                                    {
-                                                        tracing::info!("Hotkey: Ctrl+Alt (reply)");
-                                                        mode.store(MODE_REPLY, Ordering::SeqCst);
-                                                        recording.store(true, Ordering::SeqCst);
-                                                    }
-                                                } else if value == 0 {
-                                                    if mode.load(Ordering::SeqCst) == MODE_REPLY {
-                                                        mode.store(MODE_IDLE, Ordering::SeqCst);
-                                                    }
-                                                }
-                                            }
                                             _ => {}
                                         }
                                     }
@@ -210,7 +290,7 @@ mod linux_impl {
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
-pub use windows_impl::install_hook;
+pub use windows_impl::{install_hook, set_hotkey_def};
 
 #[cfg(target_os = "linux")]
-pub use linux_impl::install_hook;
+pub use linux_impl::{install_hook, set_hotkey_def};

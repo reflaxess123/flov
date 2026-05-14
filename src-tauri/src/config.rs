@@ -10,6 +10,43 @@ pub struct Config {
     pub audio: AudioConfig,
     #[serde(default)]
     pub openrouter: OpenRouterConfig,
+    #[serde(default)]
+    pub backend: BackendConfig,
+    #[serde(default)]
+    pub hotkey: HotkeyConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct HotkeyConfig {
+    /// Plus-separated key combo, e.g. "Ctrl+Win", "Ctrl+Alt+Space".
+    #[serde(default = "default_hotkey_combo")]
+    pub combo: String,
+}
+impl Default for HotkeyConfig {
+    fn default() -> Self {
+        Self { combo: default_hotkey_combo() }
+    }
+}
+fn default_hotkey_combo() -> String { "Ctrl+Win".to_string() }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct BackendConfig {
+    /// "auto" picks the highest-priority available sidecar; otherwise must
+    /// match a sidecar binary name suffix (cuda, vulkan, metal, cpu).
+    #[serde(default = "default_backend_choice")]
+    pub choice: String,
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self {
+            choice: default_backend_choice(),
+        }
+    }
+}
+
+fn default_backend_choice() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,8 +84,6 @@ pub struct OpenRouterConfig {
     pub model: String,
     #[serde(default = "default_system_prompt")]
     pub system_prompt: String,
-    #[serde(default = "default_reply_system_prompt")]
-    pub reply_system_prompt: String,
 }
 
 impl Default for OpenRouterConfig {
@@ -57,7 +92,6 @@ impl Default for OpenRouterConfig {
             api_key: String::new(),
             model: default_openrouter_model(),
             system_prompt: default_system_prompt(),
-            reply_system_prompt: default_reply_system_prompt(),
         }
     }
 }
@@ -68,10 +102,6 @@ fn default_openrouter_model() -> String {
 
 fn default_system_prompt() -> String {
     "Ты — редактор голосовых транскрипций. Ты получаешь сырой текст, распознанный из речи через Whisper. Твоя задача — превратить его в чистый, грамотный текст, готовый к отправке в чат или другую языковую модель.\n\nПравила обработки:\n\n1. Исправь ошибки распознавания речи, восстанови правильные слова по контексту.\n\n2. Замени всю обсценную и ненормативную лексику на нейтральные эквиваленты, точно передающие эмоцию и смысл. Не смягчай и не теряй интенсивность высказывания — только убери мат.\n\n3. Сохрани все английские слова и термины как есть. Автор — программист и математик, в его речи регулярно встречаются англоязычные термины: названия технологий, функций, библиотек, математических концепций. Не транслитерируй и не переводи их.\n\n4. Расставь знаки препинания: запятые, точки, тире, двоеточия. Следуй правилам русской пунктуации.\n\n5. Раздели текст на логические абзацы по смыслу. Каждая отдельная мысль или тезис — новый абзац.\n\n6. Сохрани точный смысл и цель высказывания. Автор формулирует задачи, вопросы и инструкции для других языковых моделей. Критически важно не потерять, не исказить и не додумать его намерение. Не добавляй ничего от себя.\n\n7. Выведи только готовый текст. Без комментариев, пояснений, приветствий и маркдаун-разметки.".to_string()
-}
-
-fn default_reply_system_prompt() -> String {
-    "Ты — персональный ассистент для составления ответов на сообщения. Ты получаешь два входа:\n\n1. КОНТЕКСТ — текст из буфера обмена (сообщения от собеседника, переписка, письмо).\n2. ИНСТРУКЦИЯ — голосовая команда автора, описывающая, что и как ответить.\n\nПравила:\n\n1. Напиши ответ строго от лица автора. Ответ должен звучать естественно, как будто его написал живой человек в мессенджере.\n\n2. Следуй инструкции автора по содержанию и тону. Если автор сказал «отмажься», «согласись», «вежливо откажи» — делай именно это.\n\n3. Стиль: дружелюбный, лаконичный, без канцелярита и формальностей, если инструкция не требует иного. Не пиши как робот.\n\n4. Не используй мат, даже если он есть в инструкции или в исходных сообщениях.\n\n5. Не добавляй ничего, о чём автор не просил. Не додумывай факты, обещания, детали.\n\n6. Выведи только текст ответа, готовый к отправке. Без комментариев, вариантов, пояснений.".to_string()
 }
 
 fn default_model_path() -> PathBuf {
@@ -101,6 +131,8 @@ impl Config {
                 whisper: WhisperConfig::default(),
                 audio: AudioConfig::default(),
                 openrouter: OpenRouterConfig::default(),
+                backend: BackendConfig::default(),
+                hotkey: HotkeyConfig::default(),
             });
         }
 
@@ -117,4 +149,85 @@ impl Config {
 
         Ok(config)
     }
+
+    /// Path to flov.toml next to the running exe. Used by writers; load() also
+    /// resolves to this same path.
+    pub fn path() -> Result<PathBuf> {
+        let exe_dir = std::env::current_exe()
+            .context("Failed to get executable path")?
+            .parent()
+            .context("Failed to get executable directory")?
+            .to_path_buf();
+        Ok(exe_dir.join("flov.toml"))
+    }
+
+    /// Surgically updates `[backend].choice` in flov.toml using toml_edit so
+    /// user-authored comments and section ordering survive. Creates the file
+    /// (and the [backend] section) if missing.
+    pub fn write_backend_choice(choice: &str) -> Result<()> {
+        write_field(&["backend", "choice"], choice)
+    }
+
+    /// Same surgical update for `[whisper].model_path`. Stores the path as
+    /// given (typically absolute, sometimes relative-to-exe).
+    pub fn write_model_path(model_path: &std::path::Path) -> Result<()> {
+        write_field(
+            &["whisper", "model_path"],
+            &model_path.to_string_lossy().into_owned(),
+        )
+    }
+
+    /// Updates `[openrouter].<field>` in flov.toml.
+    pub fn write_openrouter_field(field: &str, value: &str) -> Result<()> {
+        write_field(&["openrouter", field], value)
+    }
+
+    /// Updates `[hotkey].combo` in flov.toml.
+    pub fn write_hotkey_combo(combo: &str) -> Result<()> {
+        write_field(&["hotkey", "combo"], combo)
+    }
+}
+
+/// Walk `[section][key]` in flov.toml, set the leaf string value, and write
+/// back. Creates the file and any missing sections.
+fn write_field(path_keys: &[&str], value: &str) -> Result<()> {
+    let path = Config::path()?;
+    let existing = if path.exists() {
+        std::fs::read_to_string(&path).with_context(|| format!("read {:?}", path))?
+    } else {
+        String::new()
+    };
+
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .context("flov.toml is not valid TOML")?;
+
+    let (last, parents) = path_keys
+        .split_last()
+        .expect("path_keys must be non-empty");
+
+    let mut node = doc.as_item_mut();
+    for k in parents {
+        if !matches!(node, toml_edit::Item::Table(_) | toml_edit::Item::None) {
+            anyhow::bail!("flov.toml has a non-table at [{}]", k);
+        }
+        if node.is_none() {
+            *node = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let table = node
+            .as_table_mut()
+            .expect("checked above");
+        if !table.contains_key(k) {
+            table.insert(k, toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        node = &mut table[*k];
+    }
+    let table = node
+        .as_table_mut()
+        .with_context(|| format!("flov.toml [{}] is not a table", parents.join(".")))?;
+    table[*last] = toml_edit::value(value);
+
+    std::fs::write(&path, doc.to_string())
+        .with_context(|| format!("write {:?}", path))?;
+    Ok(())
 }

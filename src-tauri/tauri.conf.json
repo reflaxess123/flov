@@ -24,6 +24,21 @@
         "focus": false,
         "shadow": false,
         "visible": false
+      },
+      {
+        "label": "settings",
+        "title": "flov — Settings",
+        "url": "/settings",
+        "width": 1240,
+        "height": 880,
+        "minWidth": 1080,
+        "minHeight": 720,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "resizable": true,
+        "visible": false,
+        "skipTaskbar": false
       }
     ],
     "security": {

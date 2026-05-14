@@ -1,0 +1,103 @@
+// flov-whisper-cuda — NVIDIA-CUDA transcription sidecar.
+// Same protocol as flov-whisper-cpu — see crates/flov-whisper-cpu/src/main.rs.
+// The only difference is that whisper.cpp here was compiled with the CUDA
+// backend, so transcription runs on the GPU.
+
+use std::io::{Read, Write};
+use std::path::PathBuf;
+
+use anyhow::{bail, Context, Result};
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+struct Args {
+    model: PathBuf,
+    language: String,
+}
+
+fn parse_args() -> Result<Args> {
+    let mut model: Option<PathBuf> = None;
+    let mut language = String::from("ru");
+    let mut iter = std::env::args().skip(1);
+    while let Some(a) = iter.next() {
+        match a.as_str() {
+            "--model" => {
+                model = Some(PathBuf::from(
+                    iter.next().context("--model requires a value")?,
+                ));
+            }
+            "--language" => {
+                language = iter.next().context("--language requires a value")?;
+            }
+            other => bail!("unknown argument: {}", other),
+        }
+    }
+    let model = model.context("--model is required")?;
+    if !model.exists() {
+        bail!("model file not found: {}", model.display());
+    }
+    Ok(Args { model, language })
+}
+
+fn main() {
+    if let Err(e) = run() {
+        let _ = writeln!(std::io::stderr(), "flov-whisper-cuda error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let args = parse_args()?;
+
+    let ctx = WhisperContext::new_with_params(
+        args.model.to_str().context("invalid model path")?,
+        WhisperContextParameters::default(),
+    )
+    .context("failed to load whisper model")?;
+
+    let mut buf = Vec::with_capacity(64 * 1024);
+    std::io::stdin()
+        .lock()
+        .read_to_end(&mut buf)
+        .context("failed to read stdin")?;
+
+    if buf.len() % 4 != 0 {
+        bail!("stdin byte length {} is not a multiple of 4", buf.len());
+    }
+    let samples: Vec<f32> = buf
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+
+    let mut state = ctx.create_state().context("failed to create state")?;
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_n_threads(num_cpus::get() as i32);
+    params.set_translate(false);
+    params.set_no_context(true);
+    params.set_single_segment(true);
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    params.set_language(Some(&args.language));
+
+    state
+        .full(params, &samples)
+        .context("transcription failed")?;
+
+    let n = state.full_n_segments();
+    let mut text = String::new();
+    for i in 0..n {
+        if let Some(segment) = state.get_segment(i) {
+            if let Ok(s) = segment.to_str_lossy() {
+                text.push_str(&s);
+            }
+        }
+    }
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    out.write_all(text.trim().as_bytes())
+        .context("failed to write stdout")?;
+    out.flush().ok();
+    Ok(())
+}

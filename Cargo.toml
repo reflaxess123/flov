@@ -1,11 +1,11 @@
 [workspace]
 members = ["src-tauri"]
+exclude = ["crates/*"]
 resolver = "2"
 
-# Legacy src/ + its [package]/[dependencies] removed when switching to Tauri.
-# Old code is preserved on disk for reference; the workspace no longer builds
-# it. To restore, restore [package] block from git history. #10 cleanup deletes
-# src/ entirely.
+# crates/ is excluded so each transcription-backend sidecar (CPU, CUDA,
+# Vulkan, Metal) is its own workspace and Cargo's feature unification can't
+# merge GPU features into a CPU-only build.
 
 [profile.release]
 opt-level = 3

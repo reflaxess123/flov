@@ -19,13 +19,9 @@ tauri-plugin-opener = "2"
 # Audio recording via WASAPI
 cpal = "0.15"
 
-# Whisper for transcription (whisper.cpp + CUDA)
-# 0.16 ships updated bindings.rs that match current whisper.cpp struct sizes
-# (0.14/0.15 hit E0080 "size_of - 296 overflow" on fresh builds)
-whisper-rs = { version = "0.16", features = ["cuda"] }
-
-# CPU info
-num_cpus = "1"
+# Transcription is delegated to a sidecar binary (crates/flov-whisper-*).
+# whisper-rs and num_cpus moved into those crates so flov.exe links no
+# whisper / GPU code and can ship without a CUDA toolchain.
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +29,10 @@ serde_json = "1"
 
 # Config
 toml = "0.8"
+# toml_edit preserves user comments / formatting when we rewrite a single
+# field (e.g. backend.choice from the tray menu). The plain `toml` crate
+# would round-trip-strip the file.
+toml_edit = "0.22"
 
 # Error handling
 anyhow = "1"
@@ -55,6 +55,7 @@ windows = { version = "0.61", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_System_Registry",
 ] }
 # Tray icon source PNG decode + recolor for theme adaptation.

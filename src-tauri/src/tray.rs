@@ -7,11 +7,8 @@
 //!   switches without an extra Win32 message hook.
 //! - State is conveyed via tooltip — pill UI is the primary signal.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use tauri::image::Image;
-use tauri::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem};
+use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::AppHandle;
 
@@ -81,6 +78,12 @@ fn windows_uses_dark_theme() -> bool {
     false
 }
 
+/// Returns the same icon used in the tray, themed to current Windows light/dark.
+/// Reused as the Settings window's titlebar/taskbar icon for brand consistency.
+pub fn load_themed_icon_for_window() -> Image<'static> {
+    load_themed_icon(windows_uses_dark_theme())
+}
+
 /// Loads tray.png and (if dark theme) inverts its RGB channels so the dark
 /// glyph becomes light. Falls back to a flat dark square if the file is
 /// missing or undecodeable.
@@ -118,24 +121,16 @@ fn load_themed_icon(dark_theme: bool) -> Image<'static> {
     Image::new_owned(data, SIZE, SIZE)
 }
 
-pub fn setup(
-    app: &AppHandle,
-    postprocess_available: bool,
-    postprocess_enabled: Arc<AtomicBool>,
-) -> tauri::Result<()> {
-    let postprocess_item = CheckMenuItem::with_id(
-        app,
-        "toggle_postprocess",
-        "Post-process via OpenRouter",
-        postprocess_available,
-        false,
-        None::<&str>,
-    )?;
+pub fn setup(app: &AppHandle) -> tauri::Result<()> {
+    // Tray menu is intentionally minimal: settings / stats / postprocess /
+    // backend all live inside the Settings window now. Tray stays for
+    // open + quit only.
+    let open_item = MenuItem::with_id(app, "open_settings", "Open Settings…", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&postprocess_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&open_item, &sep, &quit_item])?;
 
     let initial_dark = windows_uses_dark_theme();
-    let pp_enabled = postprocess_enabled.clone();
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(load_themed_icon(initial_dark))
@@ -143,13 +138,13 @@ pub fn setup(
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(move |app: &AppHandle, event: MenuEvent| match event.id.as_ref() {
-            "quit" => {
-                app.exit(0);
-            }
-            "toggle_postprocess" => {
-                let was = pp_enabled.load(Ordering::SeqCst);
-                pp_enabled.store(!was, Ordering::SeqCst);
-                tracing::info!("postprocess toggled: {}", !was);
+            "quit" => app.exit(0),
+            "open_settings" => {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("settings") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
             }
             _ => {}
         })

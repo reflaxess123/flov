@@ -1,0 +1,88 @@
+# Builds every transcription sidecar in crates/ and stages the binaries
+# (plus required runtime DLLs) next to the main flov binary so locate_sidecar
+# can find them during `tauri dev` and packaged builds.
+#
+# Usage:
+#   .\scripts\build-sidecars.ps1                # build all backends (release)
+#   .\scripts\build-sidecars.ps1 -Backend cpu   # only CPU
+#   .\scripts\build-sidecars.ps1 -Profile debug # also build debug
+#
+# Skips backends whose Cargo project doesn't exist yet, so adding a new
+# sidecar (vulkan, metal, …) is just a matter of creating crates/flov-whisper-X.
+
+param(
+    [string]$Backend = "all",
+    [ValidateSet("debug", "release")]
+    [string]$Profile = "release"
+)
+
+$ErrorActionPreference = "Stop"
+$root = Resolve-Path "$PSScriptRoot\.."
+$cratesDir = Join-Path $root "crates"
+$targetDir = Join-Path $root "target"
+$stageDirs = @(
+    (Join-Path $targetDir "debug"),
+    (Join-Path $targetDir "release")
+)
+
+# Source for runtime DLLs that CUDA / Vulkan / etc. dynamically load.
+# Adjust if CUDA installs elsewhere.
+$cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\x64"
+$cudaDlls = @("cublas64_13.dll", "cublasLt64_13.dll")
+
+function Build-One($name) {
+    $crate = Join-Path $cratesDir "flov-whisper-$name"
+    if (-not (Test-Path $crate)) {
+        Write-Host "skip: crates/flov-whisper-$name not found" -ForegroundColor Yellow
+        return
+    }
+    Write-Host ">> building flov-whisper-$name ($Profile)" -ForegroundColor Cyan
+    $args = @("build", "--manifest-path", "$crate/Cargo.toml", "--target-dir", $targetDir)
+    if ($Profile -eq "release") { $args += "--release" }
+    cargo @args
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed for flov-whisper-$name" }
+
+    $exe = Join-Path $targetDir "$Profile\flov-whisper-$name.exe"
+    if (-not (Test-Path $exe)) { throw "expected output not found: $exe" }
+
+    # Stage in both debug and release so tauri dev (debug flov_app) and
+    # packaged builds (release flov) can both find the sidecar.
+    foreach ($dst in $stageDirs) {
+        if (-not (Test-Path $dst)) { New-Item -ItemType Directory -Path $dst | Out-Null }
+        Copy-Item $exe (Join-Path $dst "flov-whisper-$name.exe") -Force
+    }
+
+    if ($name -eq "cuda") {
+        Stage-CudaDlls
+    }
+}
+
+function Stage-CudaDlls {
+    if (-not (Test-Path $cudaBin)) {
+        Write-Warning "CUDA bin dir not found at $cudaBin — cublas DLLs not staged"
+        return
+    }
+    foreach ($dst in $stageDirs) {
+        foreach ($dll in $cudaDlls) {
+            $src = Join-Path $cudaBin $dll
+            if (Test-Path $src) {
+                Copy-Item $src (Join-Path $dst $dll) -Force
+            } else {
+                Write-Warning "missing: $src"
+            }
+        }
+    }
+}
+
+if ($Backend -eq "all") {
+    foreach ($d in Get-ChildItem $cratesDir -Directory) {
+        if ($d.Name -like "flov-whisper-*") {
+            $name = $d.Name -replace "^flov-whisper-", ""
+            Build-One $name
+        }
+    }
+} else {
+    Build-One $Backend
+}
+
+Write-Host "done." -ForegroundColor Green

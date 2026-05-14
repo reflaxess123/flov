@@ -1,0 +1,23 @@
+[package]
+name = "flov-whisper-vulkan"
+version = "0.1.0"
+edition = "2021"
+description = "Vulkan Whisper transcription sidecar for flov (cross-vendor GPU)"
+
+# Standalone workspace — see flov-whisper-cpu/Cargo.toml for the rationale.
+[workspace]
+
+[[bin]]
+name = "flov-whisper-vulkan"
+path = "src/main.rs"
+
+[dependencies]
+whisper-rs = { version = "0.16", features = ["vulkan"] }
+anyhow = "1"
+num_cpus = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,25 @@
+[package]
+name = "flov-whisper-cpu"
+version = "0.1.0"
+edition = "2021"
+description = "CPU-only Whisper transcription sidecar for flov"
+
+# Standalone workspace so the parent workspace's resolver doesn't
+# unify whisper-rs features (CUDA) into this CPU-only binary.
+[workspace]
+
+[[bin]]
+name = "flov-whisper-cpu"
+path = "src/main.rs"
+
+[dependencies]
+# whisper-rs without `cuda` / `vulkan` / `metal` features = CPU build.
+whisper-rs = "0.16"
+anyhow = "1"
+num_cpus = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

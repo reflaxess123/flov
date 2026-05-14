@@ -1,93 +1,167 @@
 # Flov - Voice to Text Assistant
 
-Windows-приложение для голосового ввода текста. Зажимаешь Ctrl+Win, говоришь, отпускаешь — текст вставляется в активное поле через буфер обмена (Ctrl+V).
+Windows push-to-talk: зажимаешь Ctrl+Win, говоришь, отпускаешь — текст
+вставляется в активное поле через буфер обмена (Ctrl+V).
 
-## Архитектура
+UI: Tauri 2 webview с Svelte 5. Frontend рендерит Mac-style капсулу-pill у
+курсора с морф-анимацией (FFT столбики при записи → синусные волны при
+транскрипции → polished pill после AI пост-обработки). Backend: Rust,
+Win32 хук клавиатуры + cpal для записи + spawn sidecar для транскрипции.
 
-Rust, single binary, без внешних фреймворков. Транскрипция через локальную модель Whisper (whisper.cpp + CUDA).
+## Layout
 
-### Модули (`src/`)
+```
+flov/
+├── Cargo.toml          # workspace root: members = ["src-tauri"], exclude = ["crates/*"]
+├── .cargo/config.toml  # CMake/CUDA env для whisper.cpp build (нужно для CUDA sidecar)
+├── flov.toml           # дев-конфиг (gitignored), копия в target/debug/
+├── src-tauri/          # main app (flov_app.exe)
+│   ├── Cargo.toml
+│   ├── tauri.conf.json # window config: 800x200, decorations off, transparent, click-through
+│   ├── icons/          # tray.png (32x32, чёрный глиф; rt.invert на dark theme)
+│   ├── capabilities/   # Tauri 2 permissions
+│   └── src/
+│       ├── main.rs        # entry, вызывает flov_lib::run
+│       ├── lib.rs         # оркестрация: загрузка config, инициализация Recorder/Transcriber/HotkeyHook,
+│       │                  # spawn recording_loop, Tauri Builder
+│       ├── audio.rs       # WASAPI запись через cpal, ресемплинг 16kHz, FFT-спектр для оверлея
+│       ├── hotkey.rs      # глобальный хук клавиатуры Ctrl+Win, блокирует Start Menu
+│       ├── input.rs       # вставка через clipboard + SendInput Ctrl+V
+│       ├── transcribe.rs  # spawn sidecar (Command::new), pipe f32 PCM в stdin, читает stdout
+│       ├── postprocess.rs # OpenRouter API (опционально, через тогл в трее)
+│       ├── config.rs      # flov.toml parser, write_backend_choice через toml_edit
+│       ├── tray.rs        # Tauri 2 native tray, Backend меню (radio), theme-aware иконка
+│       └── ui.rs          # Tauri commands + Win32 helpers (position_at_cursor_monitor, force_click_through)
+├── crates/             # sidecar transcription backends (см. crates/README.md)
+│   ├── README.md       # архитектура sidecars + инструкция для нового backend
+│   ├── flov-whisper-cuda/    # NVIDIA, whisper-rs feature cuda
+│   ├── flov-whisper-vulkan/  # AMD/Intel iGPU, whisper-rs feature vulkan
+│   ├── flov-whisper-cpu/     # fallback
+│   └── flov-whisper-metal/   # Apple Silicon (ещё нет, инструкция в crates/README.md)
+├── ui/                 # SvelteKit (adapter-static, port 1420)
+│   └── src/
+│       ├── routes/+page.svelte  # Tauri event listener: state-changed, audio-spectrum, polished-text
+│       └── lib/
+│           ├── Pill.svelte         # morph transition (circle pop → capsule expand)
+│           ├── Waveform.svelte     # 20 статичных FFT столбиков, currentColor
+│           ├── SineWave.svelte     # 3 переплетающихся синусных волны при транскрипции
+│           └── PolishedPill.svelte # breathe анимация для финальной капсулы
+└── scripts/
+    └── build-sidecars.ps1  # билдит все crates/flov-whisper-*, копирует в target/{debug,release}/
+                             # + cublas DLLs для CUDA
+```
 
-- **main.rs** — точка входа, оркестрация потоков, Windows message loop
-- **config.rs** — загрузка `flov.toml` (опционален), дефолты для всех параметров
-- **audio.rs** — запись звука через WASAPI (cpal), ресемплинг до 16kHz, FFT-спектр для оверлея
-- **transcribe.rs** — загрузка whisper модели и транскрипция аудио в текст
-- **hotkey.rs** — глобальный хук клавиатуры (Ctrl+Win), блокирует открытие Start Menu
-- **input.rs** — вставка текста через буфер обмена + SendInput (Ctrl+V)
-- **postprocess.rs** — пост-обработка текста через OpenRouter API (опционально)
-- **overlay.rs** — полупрозрачный оверлей возле курсора с FFT-спектром (eframe/egui)
-- **tray.rs** — иконка в трее (цветной кружок), меню с кнопкой "Выход"
+## Транскрипция через sidecars
 
-### Потоки
+Главное архитектурное решение: транскрипция вынесена в **отдельные бинари
+по backend'у**. `flov_app.exe` не знает про whisper-rs / CUDA / Vulkan и не
+требует CUDA toolchain для своей сборки. См. `crates/README.md` для полной
+картины — wire protocol, build, добавление нового sidecar.
 
-1. **Main thread** — Windows message loop, обновление иконки трея
-2. **Recording thread** — ожидание хоткея, запись, транскрипция
-3. **Text insertion thread** — получает текст по каналу, вставляет через clipboard
-4. **Overlay thread** — eframe окно с FFT-визуализацией
+Селекция backend'а в `transcribe::resolve_sidecar`:
+1. `FLOV_BACKEND` env var (debug override)
+2. `[backend].choice` из flov.toml (тогглится из tray-меню)
+3. `auto` → priority `[cuda, vulkan, metal, cpu]`, первый существующий рядом с exe
 
-### Иконки трея (состояния)
+При смене backend'а из tray не нужен рестарт — Transcriber резолвит sidecar
+на каждый transcribe call через shared `Arc<Mutex<String>>`.
 
-- Красная — ожидание (Idle)
-- Зелёная — запись (Recording)
-- Жёлтая — транскрипция (Transcribing)
+## UI flow
 
-### Пост-обработка текста
+Threads:
+1. **Main** — Win message loop, tray events
+2. **Recording loop** (`lib.rs::recording_loop`) — ждёт хоткей, эмитит state events
+   (`state-changed: idle|recording|transcribing|polished`), пишет аудио в Recorder,
+   вызывает Transcriber, шлёт текст
+3. **WebView** — Svelte рендерит Pill реагирующий на state events
 
-Опциональная обработка распознанного текста через OpenRouter API. Включается/выключается через чекбокс в меню трея. Если API ключ не задан в конфиге — пункт меню недоступен (greyed out).
+Tauri events:
+- `state-changed: "idle"|"recording"|"transcribing"|"polished"` → Pill переключает контент
+- `audio-spectrum: number[]` (20 bands) → Waveform столбики
+- `polished-text: string` → PolishedPill показывает финальный текст
+
+Tauri commands (frontend → backend):
+- `polished_shown` — анимация polished pill закончилась, можно paste'ить
+- `hide_window` — после morph-out transition прячем окно (избегаем мигание)
+
+Tray меню:
+- **Backend**: Auto / CUDA / Vulkan / Metal / CPU (radio, greyed для отсутствующих sidecars)
+- **Post-process via OpenRouter** (greyed без API key)
+- **Quit**
 
 ## Сборка
 
-whisper-rs требует CUDA. Из-за несовместимости VS 18 Insiders + CUDA 13.0, нужны env vars:
-
+Main app:
 ```powershell
-CMAKE_GENERATOR=Ninja
-CMAKE_MAKE_PROGRAM="C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
-CUDAFLAGS="-allow-unsupported-compiler"
-CMAKE_CUDA_FLAGS="-allow-unsupported-compiler"
-cargo build --release
+cd src-tauri && tauri dev      # дев с hot reload
+tauri build                    # release
 ```
+
+Sidecars (отдельная команда — workspace excluded):
+```powershell
+.\scripts\build-sidecars.ps1                  # все backend'ы (release)
+.\scripts\build-sidecars.ps1 -Backend cuda    # один
+.\scripts\build-sidecars.ps1 -Profile debug   # debug build
+```
+
+Скрипт сам стейджит exe + cublas DLLs (для CUDA) в `target/debug` и
+`target/release`, чтобы `tauri dev` и packaged build их подхватили.
+
+CUDA build env (уже в `.cargo/config.toml`, не надо ручками):
+- `CMAKE_GENERATOR=Ninja`, `CUDAFLAGS=-allow-unsupported-compiler`,
+  `CXXFLAGS=/Zc:preprocessor`, `CMAKE_CUDA_FLAGS="-Xcompiler /Zc:preprocessor"`
+
+Vulkan build требует LunarG SDK: `winget install KhronosGroup.VulkanSDK`,
+после установки `VULKAN_SDK` подхватывается из system env (новый shell).
 
 ## Дистрибуция
 
-Для работы нужны 4 файла рядом:
-
+Минимум для CUDA-варианта:
 ```
 flov.exe
-ggml-large-v3-turbo.bin    # whisper модель (~1.6 GB)
-cublas64_13.dll            # CUDA cuBLAS
-cublasLt64_13.dll          # CUDA cuBLAS (зависимость cublas64)
+flov-whisper-cuda.exe
+cublas64_13.dll
+cublasLt64_13.dll
+ggml-large-v3-turbo.bin     # модель ~1.6 GB
+icons/tray.png
+flov.toml                    # опционален
 ```
 
-Скрипт `download-model.ps1` скачивает модель в `target/release/`.
+Можно класть несколько sidecar бинарей рядом — pick'ается на runtime.
+Vulkan/CPU sidecars не требуют дополнительных DLL.
 
-## Конфиг
-
-`flov.toml` рядом с exe (опционален — без него работает с дефолтами):
+## flov.toml
 
 ```toml
 [whisper]
-model_path = "ggml-large-v3-turbo.bin"  # относительно exe или абсолютный путь
-language = "ru"                          # дефолт: "ru"
+model_path = "ggml-large-v3-turbo.bin"  # относительно exe или абсолютный
+language = "ru"
 
 [audio]
-sample_rate = 16000                      # дефолт: 16000
+sample_rate = 16000
+
+[backend]
+choice = "auto"  # "auto" | "cuda" | "vulkan" | "metal" | "cpu"
+                 # перетирается из tray-меню через toml_edit (комменты сохраняются)
 
 [openrouter]
-api_key = "sk-or-..."                    # API ключ OpenRouter (обязателен для пост-обработки)
-model = "openai/gpt-4o-mini"             # дефолт: gpt-4o-mini
-system_prompt = "Исправь текст..."       # дефолт: промпт для исправления ошибок распознавания
+api_key = "sk-or-..."        # без ключа пост-обработка недоступна
+model = "openai/gpt-4o-mini"
+system_prompt = "..."
+reply_system_prompt = "..."
 ```
 
-## Зависимости (Cargo.toml)
+## Зависимости (src-tauri/Cargo.toml)
 
-- **whisper-rs** (0.15, cuda) — транскрипция
-- **cpal** — запись аудио (WASAPI)
+- **tauri** (2, features = ["tray-icon", "image-png"])
+- **cpal** — WASAPI запись
 - **rustfft** — FFT для спектра
-- **eframe/egui** — оверлей
-- **tray-icon** — иконка в трее
-- **windows** — Win32 API (хук клавиатуры, clipboard, SendInput)
-- **ureq** — HTTP-клиент для OpenRouter API
-- **serde/toml** — конфиг
-- **anyhow** — обработка ошибок
-- **tracing** — логирование в flov.log
-- **num_cpus** — количество потоков для whisper
+- **windows** (0.61) — Win32 API (хук, clipboard, MonitorFromPoint, Registry)
+- **ureq** — HTTP клиент для OpenRouter
+- **toml** + **toml_edit** — конфиг (read + surgical write)
+- **image** — recolor tray PNG для dark theme
+- **anyhow**, **tracing**, **tracing-subscriber**, **serde/serde_json**
+
+Sidecar crates (`crates/flov-whisper-*/Cargo.toml`):
+- **whisper-rs** (0.16, разные features per backend)
+- **anyhow**, **num_cpus**

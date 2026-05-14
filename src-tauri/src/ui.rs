@@ -48,6 +48,32 @@ pub fn position_at_cursor_monitor(window: &tauri::WebviewWindow) {
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
 }
 
+/// Disable Win11's native window-corner rounding so the OS doesn't paint a
+/// rounded mask on top of our CSS border-radius (which produced ugly Win11
+/// corner pixels showing through the frameless transparent window).
+#[cfg(target_os = "windows")]
+pub fn disable_native_window_rounding(window: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    };
+
+    let raw = match window.hwnd() {
+        Ok(h) => h.0,
+        Err(_) => return,
+    };
+    let hwnd = HWND(raw);
+    let pref = DWMWCP_DONOTROUND;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const _ as *const _,
+            std::mem::size_of_val(&pref) as u32,
+        );
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub fn force_click_through(window: &tauri::WebviewWindow) {
     use windows::Win32::Foundation::HWND;

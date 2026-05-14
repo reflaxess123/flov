@@ -297,25 +297,16 @@ fn recording_loop(
             raw_text
         };
 
-        // Polished pill is only meaningful when AI transformed the text.
-        // Without postprocess we skip the show — paste straight away.
-        let used_postprocess =
-            postprocess_enabled.load(Ordering::SeqCst) && pp_snapshot.is_some();
-
-        if used_postprocess {
-            // Hand off to frontend, which fires `polished-shown` after its
-            // animation; meanwhile we wait for the matching command to paste.
-            let _ = app.emit("polished-text", &final_text);
-            emit_state(&app, UiState::Polished);
-            // The actual paste is triggered by `polished_shown` invoke handler.
-            // Hold the text in app state for that handler:
-            *ui::PENDING_TEXT.lock().unwrap() = Some(final_text);
-        } else {
-            input::type_text(&final_text);
-            emit_state(&app, UiState::Idle);
-            tray::set_state(&app, tray::TrayState::Idle);
-            // Frontend's morph-out transition fires hide_window when finished.
-        }
+        // Pill stays on the "transcribing" sine wave the entire time the
+        // postprocess HTTP call is in flight — once the final text is in
+        // hand we paste immediately and let the pill morph out, identical
+        // to the no-postprocess path. The previous "polished" stage caused
+        // a ~360 ms blank pill (out-fade + in-fade delay) before the paste,
+        // and it gave nothing the user couldn't see in the editor itself.
+        input::type_text(&final_text);
+        emit_state(&app, UiState::Idle);
+        tray::set_state(&app, tray::TrayState::Idle);
+        // Frontend's morph-out transition fires hide_window when finished.
     }
 }
 

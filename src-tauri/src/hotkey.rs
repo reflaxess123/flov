@@ -67,13 +67,23 @@ impl HotkeyDef {
 
 #[allow(dead_code)] // Linux build doesn't use these but the parser needs the table
 fn modifier_vk_codes(token: &str) -> Option<Vec<u16>> {
-    // We use the "either left or right" composite VKs (VK_CONTROL = 0x11 etc.)
-    // — GetAsyncKeyState handles both sides.
+    // Generic tokens use the "either left or right" composite VK
+    // (VK_CONTROL = 0x11 etc.) — GetAsyncKeyState handles both sides.
+    // L/R-specific tokens map to their side-specific VK so a binding like
+    // "RCtrl" can mean "right ctrl only".
     match token.to_ascii_lowercase().as_str() {
-        "ctrl" | "control" => Some(vec![0x11]),  // VK_CONTROL
-        "alt" | "menu"     => Some(vec![0x12]),  // VK_MENU
-        "shift"            => Some(vec![0x10]),  // VK_SHIFT
-        "win" | "meta" | "super" | "cmd" => Some(vec![0x5B, 0x5C]), // VK_LWIN, VK_RWIN
+        "ctrl" | "control" => Some(vec![0x11]),
+        "lctrl"            => Some(vec![0xA2]),
+        "rctrl"            => Some(vec![0xA3]),
+        "alt" | "menu"     => Some(vec![0x12]),
+        "lalt"             => Some(vec![0xA4]),
+        "ralt"             => Some(vec![0xA5]),
+        "shift"            => Some(vec![0x10]),
+        "lshift"           => Some(vec![0xA0]),
+        "rshift"           => Some(vec![0xA1]),
+        "win" | "meta" | "super" | "cmd" => Some(vec![0x5B, 0x5C]),
+        "lwin"             => Some(vec![0x5B]),
+        "rwin"             => Some(vec![0x5C]),
         _ => None,
     }
 }
@@ -81,12 +91,21 @@ fn modifier_vk_codes(token: &str) -> Option<Vec<u16>> {
 #[allow(dead_code)]
 fn trigger_vk_codes(token: &str) -> Option<Vec<u16>> {
     // Trigger keys can be any modifier OR a regular key — we normalise here.
+    // The low-level keyboard hook reports L/R-specific VKs in
+    // KBDLLHOOKSTRUCT.vkCode, so for the *generic* names we expand to both
+    // sides; for the side-specific names we match exactly one VK.
     if let Some(mods) = modifier_vk_codes(token) {
         return Some(match token.to_ascii_lowercase().as_str() {
-            "ctrl" | "control" => vec![0xA2, 0xA3], // L+R Control
-            "alt" | "menu"     => vec![0xA4, 0xA5], // L+R Menu
-            "shift"            => vec![0xA0, 0xA1], // L+R Shift
-            _ => mods, // win — already L+R
+            "ctrl" | "control" => vec![0xA2, 0xA3],
+            "lctrl"            => vec![0xA2],
+            "rctrl"            => vec![0xA3],
+            "alt" | "menu"     => vec![0xA4, 0xA5],
+            "lalt"             => vec![0xA4],
+            "ralt"             => vec![0xA5],
+            "shift"            => vec![0xA0, 0xA1],
+            "lshift"           => vec![0xA0],
+            "rshift"           => vec![0xA1],
+            _ => mods, // win/lwin/rwin already correct
         });
     }
     let lower = token.to_ascii_lowercase();

@@ -55,9 +55,9 @@
     --fg: #18181b;
     --muted: #71717a;
     --border: #e4e4e7;
-    --accent: #7c3aed;
+    --accent: #18181b;
     --accent-fg: #ffffff;
-    --accent-soft: rgba(124, 58, 237, 0.10);
+    --accent-soft: rgba(24, 24, 27, 0.06);
     --ok: #10b981;
     --warn: #f59e0b;
     --danger: #ef4444;

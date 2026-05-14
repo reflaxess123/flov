@@ -1,123 +1,145 @@
 <script lang="ts">
-  import { fade } from "svelte/transition";
-  import { cubicInOut } from "svelte/easing";
-  import Waveform from "./Waveform.svelte";
-  import SineWave from "./SineWave.svelte";
+  import AudioWave from "./AudioWave.svelte";
 
   type State = "idle" | "recording" | "transcribing" | "polished";
+  type Props = { status: State; spectrum: number[]; polishedText?: string };
 
-  let { state, spectrum, polishedText }: {
-    state: State;
-    spectrum: number[];
-    polishedText: string;
-  } = $props();
+  let { status, spectrum }: Props = $props();
 
-  // Custom transition: a small circle pops in, then expands horizontally into
-  // the capsule. Svelte runs the same css(t) for both in and out — for `out:`
-  // it feeds t from 1 → 0, giving us a perfectly mirrored collapse.
-  function morphPill(_node: HTMLElement, { duration = 460 }: { duration?: number } = {}) {
+  const audioAmp = $derived.by(() => {
+    if (!spectrum || spectrum.length === 0) return 0;
+    let s = 0;
+    for (const v of spectrum) s += v;
+    return Math.min(1, (s / spectrum.length) * 3.5);
+  });
+
+  // Sequenced amplitude during transcribing: dim to flat first, let the
+  // colour cross-fade to accent, then ramp the new bold green line back
+  // up. AudioWave's smoother does the actual fall/rise — we just feed
+  // the right targets.
+  let processingAmp = $state(0);
+  $effect(() => {
+    if (status === "transcribing") {
+      processingAmp = 0;
+      const id = setTimeout(() => { processingAmp = 0.6; }, 380);
+      return () => clearTimeout(id);
+    }
+  });
+
+  const targetAmp = $derived(
+    status === "recording" ? audioAmp
+    : status === "transcribing" ? processingAmp
+    : 0,
+  );
+
+  // Recording shows several interweaving lines; processing collapses to
+  // one bold accent line.
+  const lineCount = $derived(status === "recording" ? 3 : 1);
+
+  // Spring-ish overshoot for the bubble pop — the "вжух".
+  function backOut(t: number): number {
+    const c = 1.55;
+    const u = t - 1;
+    return 1 + (c + 1) * u * u * u + c * u * u;
+  }
+  function easeOutCubic(t: number): number {
+    const u = 1 - t;
+    return 1 - u * u * u;
+  }
+
+  // Pop and horizontal expansion overlap so the bubble has almost finished
+  // its scale-in when the pill starts stretching — reads as one gesture
+  // rather than two beats. Floored at 0.1 so a stale frame can't render
+  // the pill at scale(0).
+  function morphPill(_node: HTMLElement, { duration = 480 }: { duration?: number } = {}) {
     return {
       duration,
-      easing: cubicInOut,
       css: (t: number) => {
-        // Phase 1 (0–35%): bubble pops in (scale + opacity), width stays at 44 (circle)
-        // Phase 2 (35–100%): bubble expands horizontally to full capsule width
-        const popT = Math.min(t / 0.35, 1);
-        const expandT = Math.max((t - 0.35) / 0.65, 0);
-        const scl = 0.25 + popT * 0.75;
-        const op = popT;
-        const minWidth = 44 + expandT * 116; // 44 (circle) → 160 (capsule)
+        const popT = Math.min(1, t / 0.55);
+        const expandT = Math.max(0, Math.min(1, (t - 0.4) / 0.6));
+        const popEased = backOut(popT);
+        const exEased = easeOutCubic(expandT);
+        const minWidth = 36 + exEased * 74;
+        const safeScale = Math.max(0.1, popEased);
         return `
-          transform: scale(${scl});
+          transform: scale(${safeScale});
           transform-origin: center;
-          opacity: ${op};
           min-width: ${minWidth}px;
           overflow: hidden;
         `;
       },
     };
   }
+
+  // Reveal of the inner line. RAF-driven so it stays in sync with the
+  // pill's scale animation. The line is "drawn" via stroke-dashoffset
+  // inside AudioWave, which never collapses the layout — even if the
+  // RAF skips a frame the path is still in the DOM at full size.
+  let revealAmount = $state(1);
+  let revealRaf = 0;
+  $effect(() => {
+    cancelAnimationFrame(revealRaf);
+    if (status === "idle") {
+      revealAmount = 1;
+      return;
+    }
+    revealAmount = 0;
+    const start = performance.now();
+    const total = 480;
+    const animate = (now: number) => {
+      const t = Math.min(1, (now - start) / total);
+      const ex = Math.max(0, Math.min(1, (t - 0.4) / 0.6));
+      revealAmount = easeOutCubic(ex);
+      if (t < 1) revealRaf = requestAnimationFrame(animate);
+    };
+    revealRaf = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(revealRaf);
+  });
 </script>
 
-{#if state !== "idle"}
-  <div class="pill" class:wide={state === "polished"} transition:morphPill>
-    {#key state}
-      <div
-        class="content"
-        in:fade={{ duration: 220, delay: 220, easing: cubicInOut }}
-        out:fade={{ duration: 140, easing: cubicInOut }}
-      >
-        {#if state === "recording"}
-          <Waveform {spectrum} />
-        {:else if state === "transcribing"}
-          <SineWave width={140} height={20} />
-        {:else if state === "polished"}
-          <span class="polished-text">{polishedText}</span>
-        {/if}
-      </div>
-    {/key}
+{#if status !== "idle"}
+  <div class="pill" class:processing={status === "transcribing"} transition:morphPill>
+    <AudioWave amplitude={targetAmp} lines={lineCount} reveal={revealAmount} />
   </div>
 {/if}
 
 <style>
   .pill {
-    height: 44px;
-    min-width: 160px;
-    padding: 0 16px;
+    --pill-bg: #f5f5f7;
+    --pill-fg: #1c1c1e;
+    --pill-accent: #18181b;
+
+    height: 36px;
+    min-width: 110px;
+    padding: 0 8px;
     border-radius: 999px;
 
     display: flex;
     align-items: center;
     justify-content: center;
 
-    background: rgba(245, 245, 247, 0.92);
-    color: #1c1c1e;
+    background: var(--pill-bg);
+    color: var(--pill-fg);
     box-shadow:
-      0 1px 0 rgba(255, 255, 255, 0.6) inset,
-      0 8px 24px rgba(0, 0, 0, 0.18),
+      0 6px 18px rgba(0, 0, 0, 0.18),
       0 1px 3px rgba(0, 0, 0, 0.1);
 
-    backdrop-filter: blur(20px) saturate(180%);
-    -webkit-backdrop-filter: blur(20px) saturate(180%);
-
-    /* Container width morphs naturally to fit fading content */
-    transition: min-width 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
-  }
-
-  .pill.wide {
-    min-width: 220px;
+    /* Smooth colour shift between recording (text colour) and processing
+       (accent). currentColor in AudioWave's stroke picks this up. */
+    transition:
+      color 0.55s cubic-bezier(0.4, 0, 0.2, 1),
+      min-width 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
   }
 
   @media (prefers-color-scheme: dark) {
     .pill {
-      background: rgba(28, 28, 30, 0.78);
-      color: #f5f5f7;
+      --pill-bg: #1c1c1e;
+      --pill-fg: #f5f5f7;
+      --pill-accent: #d9ff42;
       box-shadow:
-        0 1px 0 rgba(255, 255, 255, 0.06) inset,
-        0 8px 24px rgba(0, 0, 0, 0.55),
+        0 6px 18px rgba(0, 0, 0, 0.55),
         0 1px 3px rgba(0, 0, 0, 0.4);
     }
   }
-
-  .content {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    /* keyed children stack so they cross-fade in place during state changes */
-    grid-area: 1 / 1;
-  }
-
-  /* Stack the cross-fading content blocks via grid so they overlap cleanly */
-  .pill {
-    display: grid;
-    place-items: center;
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .polished-text {
-    font-size: 13px;
-    font-weight: 500;
-    letter-spacing: -0.01em;
-    white-space: nowrap;
-  }
+  .pill.processing { color: var(--pill-accent); }
 </style>

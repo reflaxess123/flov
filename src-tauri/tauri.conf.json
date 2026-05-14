@@ -4,9 +4,9 @@
   "version": "0.2.0",
   "identifier": "com.flov.app",
   "build": {
-    "beforeDevCommand": "npm run dev --prefix ui",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build --prefix ui",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../ui/build"
   },
   "app": {

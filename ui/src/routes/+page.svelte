@@ -50,7 +50,7 @@
 </script>
 
 <div class="stage">
-  <Pill {state} {spectrum} {polishedText} />
+  <Pill status={state} {spectrum} {polishedText} />
 </div>
 
 <style>

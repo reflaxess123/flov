@@ -33,6 +33,11 @@
   let hotkey = $state<string>("Ctrl+Win");
   let capturing = $state(false);
   let preview = $state<string>("");
+  // Buffered combo built up across keydowns; committed on the first keyup.
+  // This lets us bind a single key (e.g. "RCtrl") AND multi-key combos
+  // (e.g. "Ctrl+Win") with the same capture loop — the keyup edge tells us
+  // the user is done picking.
+  let pending: { trigger: string; mods: string[] } | null = null;
 
   async function refreshHotkey() {
     const v = await invoke<{ combo: string }>("get_hotkey");
@@ -42,12 +47,16 @@
   function startCapture() {
     capturing = true;
     preview = "";
-    window.addEventListener("keydown", onCaptureKey, { capture: true });
+    pending = null;
+    window.addEventListener("keydown", onCaptureKeyDown, { capture: true });
+    window.addEventListener("keyup", onCaptureKeyUp, { capture: true });
   }
   function cancelCapture() {
     capturing = false;
     preview = "";
-    window.removeEventListener("keydown", onCaptureKey, { capture: true });
+    pending = null;
+    window.removeEventListener("keydown", onCaptureKeyDown, { capture: true });
+    window.removeEventListener("keyup", onCaptureKeyUp, { capture: true });
   }
   async function commitHotkey(combo: string) {
     cancelCapture();
@@ -58,42 +67,54 @@
       alert(String(e));
     }
   }
-  function onCaptureKey(e: KeyboardEvent) {
+
+  // Returns "Ctrl"|"Alt"|"Shift"|"Win" if e.key is a modifier, else null.
+  function baseModifier(e: KeyboardEvent): string | null {
+    const map: Record<string, string> = {
+      Control: "Ctrl", Alt: "Alt", Shift: "Shift", Meta: "Win",
+    };
+    return map[e.key] ?? null;
+  }
+  // Token to commit for the just-pressed key. Modifier keys get a side
+  // prefix (LCtrl/RCtrl/etc) so binding right-ctrl-only is possible.
+  function pressedToken(e: KeyboardEvent): string | null {
+    const baseMod = baseModifier(e);
+    if (baseMod) {
+      const side = e.location === 2 ? "R" : e.location === 1 ? "L" : "";
+      return side + baseMod;
+    }
+    if (e.key === " ") return "Space";
+    if (e.key.length === 1 && /[\w]/.test(e.key)) return e.key.toUpperCase();
+    return null;
+  }
+
+  function onCaptureKeyDown(e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
     if (e.key === "Escape") { cancelCapture(); return; }
 
-    // The just-pressed key — could be a modifier name or a regular key
-    const modMap: Record<string, string> = {
-      Control: "Ctrl", Alt: "Alt", Shift: "Shift", Meta: "Win",
-    };
-    const pressedMod = modMap[e.key];
-    let trigger: string | null;
-    if (pressedMod) {
-      trigger = pressedMod;
-    } else if (e.key === " ") {
-      trigger = "Space";
-    } else if (e.key.length === 1 && /[\w]/.test(e.key)) {
-      trigger = e.key.toUpperCase();
-    } else {
-      // Unrecognised key — keep listening
-      return;
-    }
+    const trigger = pressedToken(e);
+    if (!trigger) return;
 
-    // Held modifiers (excluding the just-pressed one if it IS a modifier)
-    const held: string[] = [];
-    if (e.ctrlKey  && trigger !== "Ctrl")  held.push("Ctrl");
-    if (e.altKey   && trigger !== "Alt")   held.push("Alt");
-    if (e.shiftKey && trigger !== "Shift") held.push("Shift");
-    if (e.metaKey  && trigger !== "Win")   held.push("Win");
+    const baseMod = baseModifier(e);
+    const mods: string[] = [];
+    // Held modifiers — but never include the just-pressed key itself
+    // (e.g. pressing RCtrl shouldn't yield "Ctrl+RCtrl").
+    if (e.ctrlKey  && baseMod !== "Ctrl")  mods.push("Ctrl");
+    if (e.altKey   && baseMod !== "Alt")   mods.push("Alt");
+    if (e.shiftKey && baseMod !== "Shift") mods.push("Shift");
+    if (e.metaKey  && baseMod !== "Win")   mods.push("Win");
 
-    if (held.length === 0) {
-      // Not enough — single key alone isn't a useful global hotkey
-      preview = trigger;
-      return;
-    }
+    pending = { trigger, mods };
+    preview = [...mods, trigger].join("+");
+  }
 
-    commitHotkey([...held, trigger].join("+"));
+  function onCaptureKeyUp(e: KeyboardEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!pending) return;
+    const combo = [...pending.mods, pending.trigger].join("+");
+    commitHotkey(combo);
   }
 
   async function refresh() {

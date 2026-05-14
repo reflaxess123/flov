@@ -1,49 +1,11 @@
-[package]
-name = "flov"
-version = "0.2.0"
-edition = "2021"
+[workspace]
+members = ["src-tauri"]
+resolver = "2"
 
-[dependencies]
-# Audio recording via WASAPI
-cpal = "0.15"
-
-# Whisper for transcription (uses whisper.cpp with CUDA)
-whisper-rs = { version = "0.15", features = ["cuda"] }
-
-# CPU info
-num_cpus = "1"
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-
-# Config
-toml = "0.8"
-
-# Windows API
-windows = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_System_DataExchange",
-    "Win32_System_Memory",
-] }
-
-# Tray icon
-tray-icon = "0.19"
-
-# Error handling
-anyhow = "1"
-
-# FFT for frequency spectrum
-rustfft = "6"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = "0.3"
-
-# Overlay UI
-eframe = "0.31"
-egui = "0.31"
+# Legacy src/ + its [package]/[dependencies] removed when switching to Tauri.
+# Old code is preserved on disk for reference; the workspace no longer builds
+# it. To restore, restore [package] block from git history. #10 cleanup deletes
+# src/ entirely.
 
 [profile.release]
 opt-level = 3

@@ -31,6 +31,104 @@ impl AudioRecorder {
         Ok(Self { device, config })
     }
 
+    /// Record while condition is true, emitting raw RMS amplitude (~30 Hz).
+    /// Used by the Tauri pill waveform — each emitted f32 ∈ [0, 1] is a single
+    /// rolling-bar value (peak-normalized, gently smoothed).
+    pub fn record_while_with_amplitude<F, C>(
+        &self,
+        should_continue: F,
+        on_amplitude: C,
+    ) -> Result<Vec<f32>>
+    where
+        F: Fn() -> bool + Send + 'static,
+        C: Fn(f32) + Send + 'static,
+    {
+        // ~33 ms window @ native rate; resized below once we know the rate.
+        let native_rate = self.config.sample_rate().0 as usize;
+        let window = (native_rate / 30).max(256);
+
+        let samples: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let samples_clone = samples.clone();
+        let channels = self.config.channels() as usize;
+
+        let err_fn = |err| eprintln!("Audio stream error: {}", err);
+
+        let stream = match self.config.sample_format() {
+            cpal::SampleFormat::F32 => {
+                let cfg: cpal::StreamConfig = self.config.clone().into();
+                self.device.build_input_stream(
+                    &cfg,
+                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                        let mut s = samples_clone.lock().unwrap();
+                        for chunk in data.chunks(channels) {
+                            let mono = chunk.iter().sum::<f32>() / channels as f32;
+                            s.push(mono);
+                        }
+                    },
+                    err_fn,
+                    None,
+                )?
+            }
+            cpal::SampleFormat::I16 => {
+                let cfg: cpal::StreamConfig = self.config.clone().into();
+                self.device.build_input_stream(
+                    &cfg,
+                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                        let mut s = samples_clone.lock().unwrap();
+                        for chunk in data.chunks(channels) {
+                            let mono = chunk.iter().map(|&v| v as f32 / 32768.0).sum::<f32>()
+                                / channels as f32;
+                            s.push(mono);
+                        }
+                    },
+                    err_fn,
+                    None,
+                )?
+            }
+            _ => return Err(anyhow::anyhow!("Unsupported sample format")),
+        };
+
+        stream.play()?;
+
+        // Tracking the highest peak we've seen so the bar fills the pill nicely
+        // even when the speaker is quiet. Decays slowly so we adapt back down.
+        let mut peak: f32 = 0.05;
+        let mut last_emitted_len = 0usize;
+
+        while should_continue() {
+            let s = samples.lock().unwrap();
+            let len = s.len();
+            if len.saturating_sub(last_emitted_len) >= window {
+                let start = len.saturating_sub(window);
+                let sum_sq: f32 = s[start..len].iter().map(|x| x * x).sum();
+                let rms = (sum_sq / window as f32).sqrt();
+                drop(s);
+
+                peak = (peak * 0.995).max(rms).max(0.01);
+                let normalized = (rms / peak).clamp(0.0, 1.0);
+                on_amplitude(normalized);
+                last_emitted_len = len;
+            } else {
+                drop(s);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+
+        drop(stream);
+
+        let samples = Arc::try_unwrap(samples)
+            .map_err(|_| anyhow::anyhow!("Failed to unwrap samples"))?
+            .into_inner()
+            .unwrap();
+
+        let native = self.config.sample_rate().0;
+        if native != 16000 {
+            Ok(resample(&samples, native, 16000))
+        } else {
+            Ok(samples)
+        }
+    }
+
     /// Record while condition is true, with frequency spectrum callback (20 bands)
     pub fn record_while_with_spectrum<F, C>(&self, should_continue: F, on_spectrum: C) -> Result<Vec<f32>>
     where

@@ -1,0 +1,68 @@
+[package]
+name = "flov_app"
+version = "0.2.0"
+edition = "2021"
+description = "Voice-to-text Windows app"
+
+[lib]
+name = "flov_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+
+# Audio recording via WASAPI
+cpal = "0.15"
+
+# Whisper for transcription (whisper.cpp + CUDA)
+# 0.16 ships updated bindings.rs that match current whisper.cpp struct sizes
+# (0.14/0.15 hit E0080 "size_of - 296 overflow" on fresh builds)
+whisper-rs = { version = "0.16", features = ["cuda"] }
+
+# CPU info
+num_cpus = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+
+# HTTP client for OpenRouter API
+ureq = { version = "3", features = ["json"] }
+
+# FFT for frequency spectrum
+rustfft = "6"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Registry",
+] }
+# Tray icon source PNG decode + recolor for theme adaptation.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+gtk = "0.18"
+
+# profile.release lives in workspace root Cargo.toml (warning otherwise)

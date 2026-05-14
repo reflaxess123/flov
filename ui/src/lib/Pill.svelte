@@ -73,16 +73,26 @@
 
   // Reveal of the inner line. RAF-driven so it stays in sync with the
   // pill's scale animation. The line is "drawn" via stroke-dashoffset
-  // inside AudioWave, which never collapses the layout — even if the
-  // RAF skips a frame the path is still in the DOM at full size.
+  // inside AudioWave, which never collapses the layout.
+  // `hasRevealed` is a plain ref (not $state) on purpose: making it
+  // reactive caused the effect to re-run as soon as we set it true,
+  // which fired the cleanup and cancelled the RAF before it could
+  // animate, leaving revealAmount stuck at 0 (visible as a tiny dot at
+  // the path tail). The ref still works as a latch — it just doesn't
+  // trigger re-runs.
   let revealAmount = $state(1);
+  const hasRevealedRef = { value: false };
   let revealRaf = 0;
   $effect(() => {
-    cancelAnimationFrame(revealRaf);
     if (status === "idle") {
+      cancelAnimationFrame(revealRaf);
       revealAmount = 1;
+      hasRevealedRef.value = false;
       return;
     }
+    if (hasRevealedRef.value) return;
+    hasRevealedRef.value = true;
+    cancelAnimationFrame(revealRaf);
     revealAmount = 0;
     const start = performance.now();
     const total = 480;
@@ -93,7 +103,6 @@
       if (t < 1) revealRaf = requestAnimationFrame(animate);
     };
     revealRaf = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(revealRaf);
   });
 </script>
 

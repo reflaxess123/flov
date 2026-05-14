@@ -1,32 +1,49 @@
-# Flov - Voice to Text
+# Flov
 
-Голосовой ввод текста через локальный Whisper на GPU.
+Voice-to-text для Windows. Зажми хоткей, говори, отпусти — текст вставляется
+в активное поле через буфер обмена.
 
-## Использование
+Транскрипция локальная (Whisper.cpp на GPU). Опциональная пост-обработка
+через OpenRouter (clean-up пунктуации/мата/etc).
 
-1. Положи `ggml-large-v3-turbo.bin` рядом с `flov.exe`
-2. Запусти `flov.exe`
-3. Зажми **Ctrl+Win** и говори
-4. Отпусти — текст вставится в активное поле
+## Запуск
 
-## Иконки трея
+1. Скачай или собери `flov.exe` (см. ниже)
+2. Положи `ggml-large-v3-turbo.bin` рядом (или скачай через Settings)
+3. Запусти `flov.exe` — иконка в трее
+4. Зажми **Ctrl+Win**, говори, отпусти
 
-- Красная — ожидание
-- Зелёная — запись
-- Жёлтая — транскрипция
+## Settings (правый клик по трею → Open Settings)
 
-## Сборка
+- **Models** — каталог Whisper моделей (tiny / base / small / medium / large-v3-turbo)
+- **Backend** — выбор GPU sidecar (CUDA / Vulkan / Metal / CPU), Auto = первый доступный
+- **Post-process** — OpenRouter API key, модель, системный промпт
+- **Hotkey** — любая комбинация (включая одиночный RCtrl)
+- **Stats** — heatmap записей по дням
+
+## Сборка из исходников
+
+Требования: Rust toolchain, Node.js, для CUDA — CUDA toolkit и Ninja, для
+Vulkan — LunarG SDK.
 
 ```powershell
-# Скачать модель
-.\download-model.ps1
+# Дев с hot-reload
+.\dev.cmd
 
-# Собрать
-CMAKE_GENERATOR=Ninja cargo build --release
+# Sidecar бинари (отдельно — workspace excluded)
+.\scripts\build-sidecars.ps1                  # все backend'ы
+.\scripts\build-sidecars.ps1 -Backend cuda    # один
+
+# Релиз
+.\ui\node_modules\.bin\tauri.cmd build
 ```
 
-## Требования
+Подробности по архитектуре — [CLAUDE.md](CLAUDE.md). По sidecar'ам и
+добавлению Mac/Metal — [crates/README.md](crates/README.md).
 
-- Windows 10/11
-- NVIDIA GPU с CUDA
-- ~2GB VRAM
+## Стек
+
+- Tauri 2 + Svelte 5 (frontend, frameless transparent windows)
+- Rust + cpal (WASAPI запись) + windows-rs (хук клавиатуры)
+- whisper-rs sidecar бинари по backend'у
+- OpenRouter HTTP API через ureq

@@ -47,6 +47,11 @@
     return () => cancelAnimationFrame(raf);
   });
 
+  // Always render the same number of <path> elements so that switching
+  // `lines` from 3 → 1 doesn't unmount paths 1 & 2 (which would visually
+  // "snap"). Visibility is controlled below via opacity.
+  const MAX_LINES = 3;
+
   const paths = $derived.by(() => {
     void t;
     const W = width;
@@ -55,10 +60,10 @@
     const ampScale = (H / 2 - 1.5) * (0.04 + 0.96 * smoothed);
     const dynFreq = frequency + smoothed * 1.8;
     const out: string[] = [];
-    for (let line = 0; line < lines; line++) {
-      const phaseOffset = lines > 1 ? (line / lines) * Math.PI * 1.7 : 0;
-      const freq = dynFreq + (line - (lines - 1) / 2) * 0.6;
-      const ampMul = lines > 1 ? 0.7 + 0.3 * Math.cos(line * 1.7) : 1;
+    for (let line = 0; line < MAX_LINES; line++) {
+      const phaseOffset = (line / MAX_LINES) * Math.PI * 1.7;
+      const freq = dynFreq + (line - (MAX_LINES - 1) / 2) * 0.6;
+      const ampMul = 0.7 + 0.3 * Math.cos(line * 1.7);
       const speedMul = 1 + line * 0.18;
 
       const pts: Array<[number, number]> = [];
@@ -106,11 +111,14 @@
       stroke-linejoin="round"
       stroke-dasharray="100"
       stroke-dashoffset={dashoffset}
-      opacity={lines > 1 ? (i === 0 ? 1 : 0.5) : 1}
+      opacity={i < lines ? (i === 0 ? 1 : 0.5) : 0}
     />
   {/each}
 </svg>
 
 <style>
   svg { display: block; overflow: visible; }
+  /* Smooth secondary-line fade-out so the 3 → 1 collapse looks like
+     the cluster melting into a single stroke, not snapping. */
+  path { transition: opacity 0.45s cubic-bezier(0.4, 0, 0.2, 1); }
 </style>

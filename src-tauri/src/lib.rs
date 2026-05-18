@@ -177,6 +177,14 @@ pub fn run() {
         .manage(model_state)
         .manage(app_state)
         .setup(move |app| {
+            // LSUIElement=true в Info.plist скрывает Dock-иконку, но
+            // когда Tauri показывает webview window (pill или Settings),
+            // AppKit поднимает activation policy до .regular и иконка
+            // вылезает в Dock на время сессии. Явно фиксируем .accessory
+            // чтобы окна показывались без Dock-иконки.
+            #[cfg(target_os = "macos")]
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             let app_handle = app.handle().clone();
             let window = app.get_webview_window("main").expect("main window missing");
 

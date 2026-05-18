@@ -94,6 +94,63 @@ pub fn force_click_through(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Force DWM to recomposite our layered+transparent+frameless pill
+/// window after we call `show()`.
+///
+/// The bug this exists to fix: on long sessions the user calls the
+/// hotkey, the backend logs `recording start` and the OS reports the
+/// HWND visible, but the pill never visually appears. Backend keeps
+/// working — recordings get transcribed and pasted — only the visual
+/// is stuck.
+///
+/// The mechanism is documented in WebView2 issues
+/// [#3674](https://github.com/MicrosoftEdge/WebView2Feedback/issues/3674)
+/// and [#1130](https://github.com/MicrosoftEdge/WebView2Feedback/issues/1130):
+/// for a `WS_EX_LAYERED` window, the standard WM_PAINT path doesn't
+/// touch the composited surface — DWM keeps showing whatever was on
+/// it last. Without a tickle, the surface can stay blank indefinitely,
+/// and on long sessions (or after sleep/wake) this is what users see.
+///
+/// The cheapest reliable tickle is `RedrawWindow(INVALIDATE | UPDATENOW
+/// | ERASE | FRAME)` plus a no-op `SetWindowPos` with
+/// `SWP_FRAMECHANGED`, which together force the compositor to
+/// re-evaluate the layered content. No flicker because we don't move,
+/// resize, or restack.
+#[cfg(target_os = "windows")]
+pub fn force_repaint(window: &tauri::WebviewWindow) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        RedrawWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+
+    let raw = match window.hwnd() {
+        Ok(h) => h.0,
+        Err(_) => return,
+    };
+    let hwnd = HWND(raw);
+
+    unsafe {
+        let _ = RedrawWindow(
+            Some(hwnd),
+            None,
+            None,
+            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE | RDW_FRAME,
+        );
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+    }
+}
+
 /// Frontend tells us its polished-pill animation is done — paste the buffered
 /// text. Window is hidden separately by `hide_window` after morph-out plays.
 #[tauri::command]

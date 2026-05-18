@@ -18,6 +18,47 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager};
 
+/// Open `flov.log` next to the running exe (not CWD — CWD changes when
+/// the app is launched from elsewhere) in append mode so logs survive
+/// across restarts. Wrap the File in a Mutex so the writer is `Sync` and
+/// every record actually flushes to the OS buffer (the previous
+/// `with_writer(file)` setup was both truncating on every start AND
+/// failing to write reliably). Defaults to INFO level when RUST_LOG is
+/// unset.
+fn init_logging() {
+    use std::fs::OpenOptions;
+    use std::path::PathBuf;
+    use tracing_subscriber::EnvFilter;
+
+    let log_path: PathBuf = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join("flov.log")))
+        .unwrap_or_else(|| PathBuf::from("flov.log"));
+
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    match file {
+        Ok(f) => {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(Mutex::new(f))
+                .with_ansi(false)
+                .with_target(false)
+                .try_init();
+        }
+        Err(_) => {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .try_init();
+        }
+    }
+}
+
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "kebab-case")]
 enum UiState {
@@ -29,13 +70,7 @@ enum UiState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Logging to file (mirrors current flov behavior)
-    if let Ok(log_file) = std::fs::File::create("flov.log") {
-        let _ = tracing_subscriber::fmt()
-            .with_writer(log_file)
-            .with_ansi(false)
-            .try_init();
-    }
+    init_logging();
     tracing::info!("flov starting (Tauri)");
 
     let cfg = config::Config::load().expect("config load failed");
@@ -157,6 +192,94 @@ pub fn run() {
             let app_for_thread = app_handle.clone();
             let sample_rate = sample_rate_for_loop;
 
+            // Watchdog: if the recorder loop crashes mid-iteration the
+            // hook keeps setting `is_recording=true` on every keypress
+            // but nothing clears it, so the next press silently no-ops.
+            // This thread spots that wedge and resets the flag so the
+            // user is never stuck without a manual restart.
+            {
+                let watch_recording = is_recording.clone();
+                let watch_mode = active_mode.clone();
+                std::thread::Builder::new()
+                    .name("flov-state-watchdog".into())
+                    .spawn(move || {
+                        let mut stuck_ticks = 0u8;
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            let recording = watch_recording.load(Ordering::SeqCst);
+                            let mode = watch_mode.load(Ordering::SeqCst);
+                            if recording && mode == hotkey::MODE_IDLE {
+                                stuck_ticks = stuck_ticks.saturating_add(1);
+                                if stuck_ticks >= 3 {
+                                    tracing::warn!(
+                                        "watchdog: is_recording stuck true with mode=IDLE for ~6s, resetting"
+                                    );
+                                    watch_recording.store(false, Ordering::SeqCst);
+                                    stuck_ticks = 0;
+                                }
+                            } else {
+                                stuck_ticks = 0;
+                            }
+                        }
+                    })
+                    .expect("spawn watchdog thread");
+            }
+
+            // Independent webview reload thread.
+            //
+            // WebView2's renderer process leaks DOM/JS state over
+            // multi-hour sessions and eventually stops painting our
+            // layered, transparent, always-on-top pill — the HWND stays
+            // "visible" from Windows' point of view but DWM shows
+            // nothing. This used to be tied to the recording loop, but
+            // on long idle sessions the user wouldn't trigger a
+            // recording for hours, so the reload never fired and the
+            // webview had already rotted by the time it was needed.
+            // Doing it on its own timer guarantees we refresh
+            // periodically regardless of activity.
+            //
+            // We skip the reload while the pill is visible so we don't
+            // yank it from under a live recording. The interval is
+            // 30 min, which is well inside the empirical "starts
+            // failing somewhere after a couple of hours" window.
+            {
+                let app_for_reload = app_handle.clone();
+                let watch_recording = is_recording.clone();
+                std::thread::Builder::new()
+                    .name("flov-webview-reloader".into())
+                    .spawn(move || {
+                        const RELOAD_INTERVAL: std::time::Duration =
+                            std::time::Duration::from_secs(30 * 60);
+                        loop {
+                            std::thread::sleep(RELOAD_INTERVAL);
+                            if watch_recording.load(Ordering::SeqCst) {
+                                tracing::info!(
+                                    "webview reload skipped: recording in progress"
+                                );
+                                continue;
+                            }
+                            let Some(w) = app_for_reload.get_webview_window("main") else {
+                                tracing::warn!("webview reload: main window missing");
+                                continue;
+                            };
+                            // Belt-and-suspenders: even when idle, the
+                            // OS-level visibility might be true if the
+                            // morph-out hide hasn't fired yet. Skip
+                            // this tick to keep the reload entirely
+                            // invisible.
+                            if matches!(w.is_visible(), Ok(true)) {
+                                tracing::info!("webview reload skipped: pill visible");
+                                continue;
+                            }
+                            match w.eval("location.reload()") {
+                                Ok(_) => tracing::info!("webview reload triggered"),
+                                Err(e) => tracing::warn!("webview reload failed: {}", e),
+                            }
+                        }
+                    })
+                    .expect("spawn webview reloader thread");
+            }
+
             std::thread::spawn(move || {
                 recording_loop(
                     app_for_thread,
@@ -214,6 +337,11 @@ fn recording_loop(
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
+        // Now that we've actually picked up the hotkey, mark ourselves
+        // as recording. The hook used to do this on KEYDOWN, but that
+        // created a wedge if the user pressed during the previous
+        // transcribe — see HotkeyState docs.
+        is_recording.store(true, Ordering::SeqCst);
         tracing::info!("recording start");
 
         // Pre-flight: no model → don't even start recording. Show the
@@ -240,10 +368,23 @@ fn recording_loop(
         // Reposition pill on the monitor of the cursor at recording-start.
         // Show the window only after positioning to avoid a flash on the
         // wrong monitor.
-        if let Some(window) = app.get_webview_window("main") {
-            #[cfg(target_os = "windows")]
-            ui::position_at_cursor_monitor(&window);
-            let _ = window.show();
+        match app.get_webview_window("main") {
+            Some(window) => {
+                #[cfg(target_os = "windows")]
+                ui::position_at_cursor_monitor(&window);
+                if let Err(e) = window.show() {
+                    tracing::warn!("pill window.show() failed: {}", e);
+                }
+                // Force DWM to repaint our layered/transparent pill —
+                // without this, on long sessions the HWND is visible
+                // but DWM keeps showing the previous (blank) layered
+                // surface, so the user sees nothing even though
+                // `show()` and the subsequent `emit` both succeeded.
+                // See `ui::force_repaint` docs for the full story.
+                #[cfg(target_os = "windows")]
+                ui::force_repaint(&window);
+            }
+            None => tracing::warn!("pill window missing — webview may have crashed"),
         }
         emit_state(&app, UiState::Recording);
         tray::set_state(&app, tray::TrayState::Recording);
@@ -341,6 +482,10 @@ fn recording_loop(
         emit_state(&app, UiState::Idle);
         tray::set_state(&app, tray::TrayState::Idle);
         // Frontend's morph-out transition fires hide_window when finished.
+        // Webview reload happens on an independent timer (see the
+        // "flov-webview-reloader" thread in setup()) — putting it here
+        // meant idle users could go many hours without ever hitting
+        // it.
     }
 }
 

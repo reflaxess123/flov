@@ -23,7 +23,8 @@
         "resizable": false,
         "focus": false,
         "shadow": false,
-        "visible": false
+        "visible": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling"
       },
       {
         "label": "settings",

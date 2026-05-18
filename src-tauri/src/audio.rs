@@ -275,7 +275,12 @@ impl AudioRecorder {
 
                 on_spectrum(spectrum);
             }
-            std::thread::sleep(std::time::Duration::from_millis(30));
+            // ~16 Hz emit rate. The wave looks smooth at this cadence,
+            // and over a multi-hour session it halves the IPC traffic
+            // toward the webview — relevant because Tauri's event
+            // channel doesn't shed load and can back up if the JS
+            // listener falls behind.
+            std::thread::sleep(std::time::Duration::from_millis(60));
         }
 
         drop(stream);

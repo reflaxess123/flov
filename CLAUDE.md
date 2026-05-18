@@ -215,6 +215,119 @@ system_prompt = "..."
 
 Все поля редактируются surgical через toml_edit — комментарии сохраняются.
 
+## Gotchas / hard-won lessons
+
+Реальные проблемы которые мы уже починили — не наступай повторно при
+портировании или рефакторе.
+
+### Chromium occlusion вырубает рендер pill окна (windows)
+
+Симптом: после 2-6 часов uptime юзер жмёт хоткей, backend честно делает
+`window.show()` + `emit("state-changed", "recording")`, Svelte листенер
+получает событие — **но pill не виден**. Backend продолжает работать
+идеально (recordings/transcripts/paste).
+
+Причина: Chromium фича `CalculateNativeWinOcclusion` через COM API
+виртуальных рабочих столов раз в N секунд проверяет видимость окна. Если
+оно "occluded" — **полностью останавливает рендеринг** (не throttle, STOP)
+для экономии GPU. На long uptime COM call может зафейлиться → окно
+застряло в OCCLUDED навсегда, пока процесс не перезапустят. Маленькое
+frameless transparent always-on-top окно с постоянным hide/show — идеальный
+кандидат.
+
+Fix — `additionalBrowserArgs` на pill window в `tauri.conf.json`:
+```json
+"additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling"
+```
+
+`msWebOOUI,msPdfOOUI,msSmartScreenProtection` — дефолты wry, которые
+переопределяются если задать `additionalBrowserArgs`, поэтому их надо
+вернуть. Cross-reference: [Seelen-UI webview.rs](https://github.com/eythaann/Seelen-UI/blob/main/src/background/widgets/webview.rs) делает то же.
+
+**Mac/Linux**: на Mac (WKWebView) и Linux (WebKitGTK) Chromium не
+используется — эта конкретная фича отсутствует, но похожие occlusion-
+оптимизации возможны (WKWebView имеет `_isOnscreen`). Если на macOS pill
+ведёт себя так же — копать в [`WKPreferences`](https://developer.apple.com/documentation/webkit/wkpreferences)
+/ window visibility state. На Linux обычно проще: WebKitGTK редко
+оптимизирует фоновые окна агрессивно.
+
+### LL keyboard hook затыкается через время (windows)
+
+Симптом: хоткей перестаёт реагировать после неопределённого времени
+работы / sleep+wake / "много нажатий подряд".
+
+Корни — несколько слоёв (все в `hotkey.rs::windows_impl`):
+- **Hook на dedicated thread** с тайтным `GetMessage` loop. Иначе любой
+  hiccup на main thread (Tauri command, lock контеншн) тригерит
+  `LowLevelHooksTimeout` (~300ms) и Windows **silently** деинсталлит hook.
+- **Periodic reinstall** через `SetTimer(None, 0, 30_000, None)` →
+  WM_TIMER → unhook + re-hook каждые 30s. На случай если hook всё-таки
+  убили (бывает при sleep/wake, при инжекте анти-чита и т.д.).
+- **`RwLock::try_read`** вместо Mutex — hook callback не должен ждать
+  ни наносекунды. Запись хоткея из UI берёт write на микросекунды, что
+  всё равно может триггерить timeout если бы мы блокировались.
+- **`LLKHF_INJECTED` filter** — наш собственный SendInput Ctrl+V (paste)
+  fires Ctrl-down → если бы мы его не фильтровали, на каждой вставке
+  hook callback бы тратил время и мог re-arm recorder если хоткей —
+  Ctrl как trigger.
+- **`TRIGGER_HELD` AtomicBool** отдельно от `is_recording`. Раньше hook
+  смотрел `is_recording.load()` чтобы dedupe KEYDOWN auto-repeat — но
+  если юзер жал во время `transcribe`, флаг застревал true и все
+  следующие нажатия dropиluсь. Теперь hook рулит только своим
+  `TRIGGER_HELD`, recording_loop рулит своим `is_recording`.
+
+### Recording loop wedge → watchdog в lib.rs
+
+Если recording_loop крашнется mid-iteration (panicки), `is_recording`
+останется true навсегда. Воркер `flov-state-watchdog` проверяет каждые 2s:
+если `is_recording && mode==IDLE` 3 раза подряд — сбрасывает флаг.
+
+### WebView2 long-session rot — periodic reload
+
+Helt-and-suspenders сверх occlusion fix. WebView2 renderer leak'ит memory
++ DOM state накапливается за multi-hour сессию. Воркер
+`flov-webview-reloader` делает `window.eval("location.reload()")` каждые
+30 минут, пропуская моменты когда `is_recording==true` или
+`is_visible()==true` (чтобы не дёрнуть pill из-под живой записи).
+
+Ранее этот reload был привязан к recording cycle — если юзер сидел idle
+6 часов, ни одна запись = reload так и не сработал, webview успевал
+сгнить. Independent thread решил.
+
+### VC++ Redist обязателен для ВСЕХ sidecars (windows)
+
+Не только CUDA — все sidecars (cpu/vulkan/cuda) импортят `MSVCP140.dll`,
+`VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`. На свежем Windows этих DLL
+нет. NSIS hook (`installer-hooks.nsh::NSIS_HOOK_POSTINSTALL`) сначала
+запускает `vc_redist.x64.exe /install /passive /norestart`, потом
+переименовывает cuBLAS DLLs (если CUDA вариант).
+
+`build-bundle.ps1` качает vc_redist.x64.exe с
+`aka.ms/vs/17/release/vc_redist.x64.exe` всегда (не только для CUDA).
+
+### cuBLAS DLLs path quirk (Tauri 2 NSIS)
+
+`bundle.resources` в `tauri.conf.json` ставит файлы по пути
+**`$INSTDIR\<source-rel-path>`**, НЕ `$INSTDIR\resources\` как можно
+подумать. Поэтому NSIS hook ищет cuBLAS в `$INSTDIR\binaries\runtime\`
+(не `resources\runtime\`) и переименовывает в `$INSTDIR\` (рядом с exe —
+системный DLL search path).
+
+### Logging: OpenOptions::append, не File::create
+
+`File::create()` **truncates** при каждом старте → флов.log на машинах
+юзеров был 0 KB всё время. Сейчас `OpenOptions::new().create(true).append(true)` + `Mutex<File>` writer для `Sync` (см. `lib.rs::init_logging`). Дефолтный
+уровень INFO; путь — рядом с exe (не CWD, который меняется когда
+запускают из tray/start menu).
+
+### audio-spectrum IPC saturation
+
+Раньше FFT loop в `audio.rs` слал `audio-spectrum` event раз в 30 мс
+(33 Hz). На multi-hour сессии Tauri's event channel не shed'ит load —
+если JS listener fall'ит behind, очередь IPC растёт и в итоге выглядит
+как зависание. Снизили до 60 мс (16 Hz) — wave выглядит так же гладко,
+а IPC traffic вдвое меньше.
+
 ## Зависимости (src-tauri/Cargo.toml)
 
 - **tauri** (2, features = ["tray-icon", "image-png"])

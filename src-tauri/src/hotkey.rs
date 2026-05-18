@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Active mode: 0 = idle, 1 = recording (the hotkey is held).
 pub const MODE_IDLE: u8 = 0;
@@ -7,6 +7,17 @@ pub const MODE_TRANSCRIBE: u8 = 1;
 
 pub struct HotkeyState {
     pub active_mode: Arc<AtomicU8>,
+    /// Used by the recording_loop to track whether it currently has the
+    /// recorder open. The hook does NOT consult this any more — see the
+    /// `trigger_held` field for that — because checking it from the
+    /// hook caused a stuck state when the user tapped the hotkey during
+    /// the previous transcription (the new press set `is_recording=true`
+    /// but recording_loop was still in the previous iteration's
+    /// transcribe step, so when it eventually looped back and saw
+    /// `mode=IDLE` the flag stayed true and every subsequent hotkey
+    /// press was ignored). The state-watchdog now relies on it as a
+    /// last resort but the trigger_held flag means it should rarely
+    /// fire.
     pub is_recording: Arc<AtomicBool>,
 }
 
@@ -131,7 +142,7 @@ fn trigger_vk_codes(token: &str) -> Option<Vec<u16>> {
 /// Opaque guard — drop stops the hook/grab
 pub struct HookGuard {
     #[cfg(target_os = "windows")]
-    _hook: windows::Win32::UI::WindowsAndMessaging::HHOOK,
+    _handle: std::thread::JoinHandle<()>,
     #[cfg(target_os = "linux")]
     _handle: std::thread::JoinHandle<()>,
 }
@@ -141,18 +152,42 @@ pub struct HookGuard {
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::*;
+    use std::sync::{OnceLock, RwLock};
     use windows::Win32::Foundation::*;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
 
-    static mut HOOK_STATE: Option<HotkeyState> = None;
-    /// Active hotkey definition. Updated live by the Tauri command — the
-    /// hook callback re-reads it on every keystroke so changes apply
-    /// immediately, no re-registration needed.
-    static HOOK_DEF: Mutex<Option<HotkeyDef>> = Mutex::new(None);
+    /// Set once on `install_hook`. `OnceLock` instead of `static mut` to
+    /// avoid the rust-2024 UB warnings around shared references to
+    /// mutable statics.
+    static HOOK_STATE: OnceLock<HotkeyState> = OnceLock::new();
+    /// Suppresses Windows' KEYDOWN auto-repeat: once a trigger key is
+    /// down we ignore further KEYDOWN events for it until we see the
+    /// matching KEYUP. Lives only in the hook, separate from
+    /// `is_recording` so the recording_loop's progress can't desync the
+    /// hook's idea of "is the key physically held right now".
+    static TRIGGER_HELD: AtomicBool = AtomicBool::new(false);
+    /// Active hotkey definition. `RwLock` (not `Mutex`) so the hook
+    /// callback can `try_read` without ever blocking — the UI command
+    /// that swaps the hotkey holds the write lock for microseconds, but
+    /// in a low-level keyboard hook even *microseconds* of waiting can
+    /// trip Windows' `LowLevelHooksTimeout` and get the whole hook
+    /// silently uninstalled. `try_read` falls through to the cached
+    /// `CallNextHookEx` instead of waiting.
+    static HOOK_DEF: RwLock<Option<HotkeyDef>> = RwLock::new(None);
+
+    /// `KBDLLHOOKSTRUCT.flags` bit set when the event was synthesised by
+    /// `SendInput` rather than typed by a human. We must filter these:
+    /// every paste fires Ctrl-down/V-down/V-up/Ctrl-up via SendInput,
+    /// and if those traversed our trigger logic we'd both (a) waste
+    /// hook callback time on every paste and (b) risk re-arming the
+    /// recorder mid-paste when somebody binds Ctrl as the trigger.
+    const LLKHF_INJECTED: u32 = 0x10;
 
     pub fn set_hotkey_def(def: HotkeyDef) {
-        *HOOK_DEF.lock().unwrap() = Some(def);
+        if let Ok(mut g) = HOOK_DEF.write() {
+            *g = Some(def);
+        }
     }
 
     fn modifier_held(vk: u16) -> bool {
@@ -160,47 +195,160 @@ mod windows_impl {
     }
 
     unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0 {
-            let kb = *(lparam.0 as *const KBDLLHOOKSTRUCT);
-            let vk = kb.vkCode as u16;
-            let evt = wparam.0 as u32;
+        // Hot path — keep it short. Anything that can wait or allocate
+        // belongs OUTSIDE this function, otherwise Windows will quietly
+        // disable the hook on the first slow callback.
+        if code < 0 {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+        let kb = *(lparam.0 as *const KBDLLHOOKSTRUCT);
 
-            let def_opt = HOOK_DEF.lock().unwrap().clone();
-            if let (Some(def), Some(state)) = (def_opt, &HOOK_STATE) {
-                let is_trigger = def.trigger_vks.contains(&vk);
-                if is_trigger {
-                    match evt {
-                        WM_KEYDOWN | WM_SYSKEYDOWN => {
-                            let all_held = def
-                                .modifier_vks
-                                .iter()
-                                .all(|&m| modifier_held(m));
-                            if all_held && !state.is_recording.load(Ordering::SeqCst) {
-                                state.active_mode.store(MODE_TRANSCRIBE, Ordering::SeqCst);
-                                state.is_recording.store(true, Ordering::SeqCst);
-                                // Swallow so e.g. Win doesn't open Start menu,
-                                // Space doesn't insert a space, etc.
-                                return LRESULT(1);
-                            }
+        // Skip events we generated ourselves (paste's synthetic Ctrl+V).
+        if (kb.flags.0 & LLKHF_INJECTED) != 0 {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        // Don't block waiting on the writer — fall through cleanly if
+        // the UI is currently swapping the hotkey definition.
+        let def_guard = match HOOK_DEF.try_read() {
+            Ok(g) => g,
+            Err(_) => return CallNextHookEx(None, code, wparam, lparam),
+        };
+        let Some(def) = def_guard.as_ref() else {
+            return CallNextHookEx(None, code, wparam, lparam);
+        };
+        let Some(state) = HOOK_STATE.get() else {
+            return CallNextHookEx(None, code, wparam, lparam);
+        };
+
+        let vk = kb.vkCode as u16;
+        let evt = wparam.0 as u32;
+        let is_trigger = def.trigger_vks.contains(&vk);
+        if is_trigger {
+            match evt {
+                WM_KEYDOWN | WM_SYSKEYDOWN => {
+                    // `TRIGGER_HELD` collapses Windows' KEYDOWN auto-repeat
+                    // (held key = ~30 KEYDOWNs/s) into a single arming
+                    // event. We deliberately do NOT consult
+                    // `is_recording` here: that flag belongs to the
+                    // recording_loop, and using it as a hook gate caused
+                    // a wedge when a press during the previous
+                    // transcribe left it stuck true forever.
+                    if !TRIGGER_HELD.load(Ordering::SeqCst) {
+                        let all_held = def.modifier_vks.iter().all(|&m| modifier_held(m));
+                        if all_held {
+                            TRIGGER_HELD.store(true, Ordering::SeqCst);
+                            state.active_mode.store(MODE_TRANSCRIBE, Ordering::SeqCst);
+                            // Swallow so e.g. Win doesn't open Start menu,
+                            // Space doesn't insert a space, etc.
+                            return LRESULT(1);
                         }
-                        WM_KEYUP | WM_SYSKEYUP => {
-                            if state.active_mode.load(Ordering::SeqCst) == MODE_TRANSCRIBE {
-                                state.active_mode.store(MODE_IDLE, Ordering::SeqCst);
-                            }
-                        }
-                        _ => {}
+                    } else {
+                        // Auto-repeat for an already-held trigger — still
+                        // swallow so the keystroke doesn't reach the
+                        // foreground app (otherwise repeating Space would
+                        // type spaces while the user is dictating).
+                        return LRESULT(1);
                     }
                 }
+                WM_KEYUP | WM_SYSKEYUP => {
+                    if TRIGGER_HELD.load(Ordering::SeqCst) {
+                        TRIGGER_HELD.store(false, Ordering::SeqCst);
+                        state.active_mode.store(MODE_IDLE, Ordering::SeqCst);
+                    }
+                }
+                _ => {}
             }
         }
         CallNextHookEx(None, code, wparam, lparam)
     }
 
+    /// Install the hook on a dedicated thread that does nothing but pump
+    /// messages.
+    ///
+    /// Why a dedicated thread: Windows enforces `LowLevelHooksTimeout`
+    /// (~300ms by default) and silently uninstalls any LL hook whose
+    /// owning thread is slow to dispatch — and "the owning thread" means
+    /// the one that called `SetWindowsHookExW`, not the one running the
+    /// callback. If the hook lived on the main thread, any spike on it
+    /// (Tauri command handler, blocked .lock(), GC-like pause from
+    /// transcribe activity on other cores) could let Windows decide the
+    /// hook is unresponsive and quietly nuke it. The user then sees the
+    /// hotkey "just stop working" with no error.
+    ///
+    /// On its own thread with a tight `GetMessage` loop, the hook
+    /// thread is always responsive, regardless of what the rest of the
+    /// app is doing. This is the standard fix for LL hooks on Windows.
     pub fn install_hook(state: HotkeyState) -> anyhow::Result<HookGuard> {
-        unsafe {
-            HOOK_STATE = Some(state);
-            let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0)?;
-            Ok(HookGuard { _hook: hook })
+        use std::sync::mpsc;
+
+        let _ = HOOK_STATE.set(state);
+
+        let (tx, rx) = mpsc::sync_channel::<Result<(), String>>(1);
+
+        let handle = std::thread::Builder::new()
+            .name("flov-keyhook".into())
+            .spawn(move || unsafe {
+                let mut hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        let _ = tx.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+                let _ = tx.send(Ok(()));
+                tracing::info!("keyboard hook installed on dedicated thread");
+
+                // Self-healing watchdog: re-install the hook every 30s.
+                // Empirically Windows quietly disables LL hooks under
+                // certain conditions (reportedly Sleep/Wake, certain
+                // anti-cheat/security drivers, long idles, the timeout
+                // heuristic firing once for any reason). The cost of a
+                // periodic reinstall is microseconds, and it guarantees
+                // that the hook is always alive instead of relying on
+                // the user to notice and restart the app.
+                //
+                // SetTimer with NULL hWnd posts WM_TIMER to this
+                // thread's message queue every `REINSTALL_MS` ms.
+                const REINSTALL_MS: u32 = 30_000;
+                let timer_id = SetTimer(None, 0, REINSTALL_MS, None);
+                if timer_id == 0 {
+                    tracing::warn!("SetTimer for hook watchdog failed — running without periodic reinstall");
+                }
+
+                let mut msg = MSG::default();
+                loop {
+                    let r = GetMessageW(&mut msg, None, 0, 0);
+                    if r.0 <= 0 { break; }
+
+                    if msg.message == WM_TIMER {
+                        let _ = UnhookWindowsHookEx(hook);
+                        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0) {
+                            Ok(h) => { hook = h; }
+                            Err(e) => {
+                                tracing::error!("hook reinstall failed: {} — retrying next tick", e);
+                                // Fall back to a sentinel handle; next
+                                // WM_TIMER will retry.
+                                hook = windows::Win32::UI::WindowsAndMessaging::HHOOK::default();
+                            }
+                        }
+                        continue;
+                    }
+
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+
+                if timer_id != 0 {
+                    let _ = KillTimer(None, timer_id);
+                }
+                let _ = UnhookWindowsHookEx(hook);
+            })?;
+
+        match rx.recv() {
+            Ok(Ok(())) => Ok(HookGuard { _handle: handle }),
+            Ok(Err(e)) => anyhow::bail!("SetWindowsHookExW failed: {}", e),
+            Err(e) => anyhow::bail!("hook thread vanished: {}", e),
         }
     }
 }

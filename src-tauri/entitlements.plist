@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements applied at codesign time.
+
+  - audio-input: declares mic-capture intent up front. macOS still
+    shows the standard permission prompt on first capture, but with a
+    cleaner "flov would like to access your microphone" wording (no
+    "is asking for input" generic fallback).
+  - We deliberately disable the sandbox: a sandboxed agent can't
+    install a global keyboard event tap (CGEventTap) or post synthetic
+    Cmd+V via CGEventPost. Both are the heart of push-to-talk.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <key>com.apple.security.app-sandbox</key>
+  <false/>
+</dict>
+</plist>

@@ -1,0 +1,26 @@
+[package]
+name = "flov-whisper-metal"
+version = "0.1.0"
+edition = "2021"
+description = "Metal Whisper transcription sidecar for flov (Apple Silicon)"
+
+# Standalone workspace — see flov-whisper-cpu/Cargo.toml for the rationale.
+[workspace]
+
+[[bin]]
+name = "flov-whisper-metal"
+path = "src/main.rs"
+
+[dependencies]
+# `metal` enables whisper.cpp's Metal backend (Apple Silicon GPU). Add
+# `coreml` later if/when we ship the .mlmodelc encoder alongside the
+# .bin model — that runs the encoder on the Apple Neural Engine.
+whisper-rs = { version = "0.16", features = ["metal"] }
+anyhow = "1"
+num_cpus = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

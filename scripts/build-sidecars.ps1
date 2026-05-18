@@ -25,6 +25,20 @@ $stageDirs = @(
     (Join-Path $targetDir "release")
 )
 
+# Build env for whisper.cpp on Windows + MSVC (+ CUDA 13.x). These used
+# to live in .cargo/config.toml but that file applied them globally on
+# every platform, breaking macOS/Linux builds. The vars only matter for
+# the CUDA sidecar's whisper-rs-sys cmake invocation, but it's harmless
+# to set them for cpu/vulkan too — keeps the script simple.
+$env:CMAKE_GENERATOR = "Ninja"
+$env:CMAKE_MAKE_PROGRAM = "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
+$env:CMAKE_GENERATOR_INSTANCE = ""
+$env:CUDAFLAGS = "-allow-unsupported-compiler"
+$env:CMAKE_CUDA_FLAGS = "-allow-unsupported-compiler -Xcompiler /Zc:preprocessor"
+$env:CXXFLAGS = "/Zc:preprocessor"
+$env:CFLAGS = "/Zc:preprocessor"
+$env:CCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING = "1"
+
 # Source for runtime DLLs that CUDA / Vulkan / etc. dynamically load.
 # Adjust if CUDA installs elsewhere.
 $cudaBin = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\x64"

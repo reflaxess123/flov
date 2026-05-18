@@ -1,12 +1,6 @@
-# Permanent build env so we don't need to source vars each time we run cargo.
-# These tame the CMake build for whisper-rs-sys on Windows + CUDA 13.x + MSVC.
-
-[env]
-CMAKE_GENERATOR = "Ninja"
-CMAKE_MAKE_PROGRAM = "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
-CMAKE_GENERATOR_INSTANCE = ""
-CUDAFLAGS = "-allow-unsupported-compiler"
-CMAKE_CUDA_FLAGS = "-allow-unsupported-compiler -Xcompiler /Zc:preprocessor"
-CXXFLAGS = "/Zc:preprocessor"
-CFLAGS = "/Zc:preprocessor"
-CCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING = "1"
+# Cargo config kept intentionally minimal so cross-platform builds (macOS,
+# Linux) aren't polluted by Windows-MSVC/CUDA env vars. The CMake/CUDA
+# environment that whisper.cpp needs on Windows + CUDA 13.x is set in
+# scripts/build-sidecars.ps1 right before invoking cargo. The Mac build
+# (Metal sidecar) doesn't need any extra env — Metal headers ship with
+# the macOS SDK.

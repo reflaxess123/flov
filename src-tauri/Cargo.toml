@@ -2,7 +2,7 @@
 name = "flov_app"
 version = "0.2.0"
 edition = "2021"
-description = "Voice-to-text Windows app"
+description = "Voice-to-text desktop app (Windows / macOS)"
 
 [lib]
 name = "flov_lib"
@@ -12,9 +12,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# Tauri
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# Tauri. `macos-private-api` is paired with `app.macOSPrivateApi: true`
+# in tauri.macos.conf.json — required for the pill's transparent +
+# shadow-disabled window on macOS. On Windows / Linux the feature
+# is a no-op so it's enabled unconditionally to keep the Cargo file
+# free of target-specific feature splits.
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-opener = "2"
+
 
 # Audio recording via WASAPI
 cpal = "0.15"
@@ -47,6 +52,18 @@ rustfft = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Tray icon PNG decode. On Windows the bytes are recolored at runtime
+# for dark-theme support; on macOS the same PNG is shipped as a
+# template image (NSImage isTemplate=YES). Either way Tauri's
+# Image::new wants raw RGBA — so we need a PNG decoder in all builds.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Clipboard (set text). Used by input.rs on macOS + Linux for the
+# copy step of the paste-via-clipboard flow. Windows has its own
+# Win32 clipboard impl in input.rs::windows_impl.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",
@@ -58,12 +75,16 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Dwm",
     "Win32_System_Registry",
 ] }
-# Tray icon source PNG decode + recolor for theme adaptation.
-image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# CoreGraphics: CGEventTap (global hotkey hook) + CGEventPost (synthetic
+# Cmd+V for paste) + CGDisplay (cursor's screen for pill positioning).
+core-graphics = "0.24"
+# CoreFoundation: CFRunLoop to host the event tap.
+core-foundation = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"
-arboard = { version = "3.6", features = ["wayland-data-control"] }
 gtk = "0.18"
 
 # profile.release lives in workspace root Cargo.toml (warning otherwise)

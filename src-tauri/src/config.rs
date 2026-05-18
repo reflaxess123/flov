@@ -27,7 +27,19 @@ impl Default for HotkeyConfig {
         Self { combo: default_hotkey_combo() }
     }
 }
-fn default_hotkey_combo() -> String { "Ctrl+Win".to_string() }
+fn default_hotkey_combo() -> String {
+    // Mac users press Cmd+Option (the "Ctrl+Win" calque maps to
+    // Ctrl+Cmd on macOS, which collides with system shortcuts
+    // like Ctrl+Cmd+Q = lock screen and Ctrl+Cmd+Space = emoji picker).
+    #[cfg(target_os = "macos")]
+    {
+        return "Cmd+Alt".to_string();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "Ctrl+Win".to_string()
+    }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct BackendConfig {
@@ -125,11 +137,12 @@ fn default_system_prompt() -> String {
 }
 
 fn default_model_path() -> PathBuf {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_default();
-    exe_dir.join("ggml-large-v3-turbo.bin")
+    // Same filename as before so users carrying a manually-downloaded
+    // model only need to drop it into the user data dir
+    // (see paths::user_data_dir).
+    crate::paths::user_data_dir()
+        .map(|d| d.join("ggml-large-v3-turbo.bin"))
+        .unwrap_or_else(|_| PathBuf::from("ggml-large-v3-turbo.bin"))
 }
 
 fn default_sample_rate() -> u32 {
@@ -138,13 +151,10 @@ fn default_sample_rate() -> u32 {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let exe_dir = std::env::current_exe()
-            .context("Failed to get executable path")?
-            .parent()
-            .context("Failed to get executable directory")?
-            .to_path_buf();
-
-        let config_path = exe_dir.join("flov.toml");
+        let config_path = crate::paths::config_path()
+            .context("Failed to compute config path")?;
+        let data_dir = crate::paths::user_data_dir()
+            .context("Failed to compute data dir")?;
 
         if !config_path.exists() {
             return Ok(Config {
@@ -162,23 +172,19 @@ impl Config {
         let mut config: Config = toml::from_str(&config_str)
             .context("Failed to parse config")?;
 
-        // Resolve relative model_path against exe directory
+        // Resolve relative model_path against the data dir (where the
+        // Models window also drops downloads).
         if config.whisper.model_path.is_relative() {
-            config.whisper.model_path = exe_dir.join(&config.whisper.model_path);
+            config.whisper.model_path = data_dir.join(&config.whisper.model_path);
         }
 
         Ok(config)
     }
 
-    /// Path to flov.toml next to the running exe. Used by writers; load() also
-    /// resolves to this same path.
+    /// Path to flov.toml. Used by writers; load() also resolves to this
+    /// same path.
     pub fn path() -> Result<PathBuf> {
-        let exe_dir = std::env::current_exe()
-            .context("Failed to get executable path")?
-            .parent()
-            .context("Failed to get executable directory")?
-            .to_path_buf();
-        Ok(exe_dir.join("flov.toml"))
+        crate::paths::config_path()
     }
 
     /// Surgically updates `[backend].choice` in flov.toml using toml_edit so

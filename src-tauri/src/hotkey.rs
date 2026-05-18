@@ -145,6 +145,11 @@ pub struct HookGuard {
     _handle: std::thread::JoinHandle<()>,
     #[cfg(target_os = "linux")]
     _handle: std::thread::JoinHandle<()>,
+    // macOS keeps the tap alive inside the dedicated CFRunLoop thread.
+    // The thread leaks intentionally for the lifetime of the process;
+    // recording_loop has no clean shutdown path either.
+    #[cfg(target_os = "macos")]
+    _phantom: (),
 }
 
 // ─── Windows ────────────────────────────────────────────────────────────────
@@ -353,6 +358,466 @@ mod windows_impl {
     }
 }
 
+// ─── macOS ──────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+mod macos_impl {
+    //! Global push-to-talk hook via a CoreGraphics event tap.
+    //!
+    //! The tap lives in a dedicated thread that runs its own CFRunLoop.
+    //! When a configured trigger fires (with all required modifiers held)
+    //! we flip `active_mode` to `MODE_TRANSCRIBE`. Releasing the trigger
+    //! flips it back. The recording loop in `lib.rs` polls those flags
+    //! exactly like on Windows / Linux.
+    //!
+    //! Suppression: the `core_graphics` 0.24 high-level wrapper can't
+    //! return NULL from the tap callback (which is what suppresses an
+    //! event in CoreGraphics). For combos that have a built-in macOS
+    //! action (e.g. Cmd+Space → Spotlight) we'd need a raw FFI call to
+    //! suppress. The default Cmd+Alt has no system action, so pass-
+    //! through is acceptable for v1; revisit if users complain.
+    //!
+    //! Permission: the first time we install the tap the system prompts
+    //! the user for Accessibility access (Settings → Privacy & Security
+    //! → Accessibility). Without it `CGEventTapCreate` returns NULL.
+
+    use super::*;
+    use std::sync::atomic::AtomicPtr;
+    use std::sync::{Once, OnceLock, RwLock};
+
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+    use core_foundation::string::CFString;
+    use core_graphics::event::{
+        CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
+        CGEventTapPlacement, CGEventType, EventField,
+    };
+
+    // Apple's AX API for checking + prompting Accessibility permission.
+    // We can't go through the high-level `accessibility-sys` crate because
+    // it pulls AppKit + adds an extra build step, so we link the symbols
+    // straight from ApplicationServices.
+    //
+    // (Plain `//` comment, not `///`: rustdoc warns on doc comments
+    // attached to extern blocks because it can't render them.)
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(
+            options: core_foundation::dictionary::CFDictionaryRef,
+        ) -> bool;
+    }
+
+    // Raw FFI for re-enabling a tap. The high-level
+    // `CGEventTap::enable(&self)` needs a wrapper instance, but we can
+    // only get one at tap-construction time on the worker thread — the
+    // callback is a `fn`, not a closure capturing the tap. Stashing the
+    // raw CFMachPort and calling `CGEventTapEnable` directly is the
+    // cleanest way to re-arm after `TapDisabledBy{Timeout,UserInput}`.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventTapEnable(
+            tap: core_foundation::mach_port::CFMachPortRef,
+            enable: bool,
+        );
+    }
+
+    /// Returns true if the process is already trusted for Accessibility.
+    /// `prompt=false` so we never trigger macOS's broken auto-prompt
+    /// (see `install_hook` for the rationale).
+    fn accessibility_check(prompt: bool) -> bool {
+        let key = CFString::new("AXTrustedCheckOptionPrompt");
+        let value = if prompt {
+            CFBoolean::true_value()
+        } else {
+            CFBoolean::false_value()
+        };
+        let dict = CFDictionary::from_CFType_pairs(&[(key, value)]);
+        unsafe { AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef()) }
+    }
+
+    /// Walk up from the running executable to the `.app` bundle root
+    /// (`Foo.app`), or return the executable path itself if we're a
+    /// loose binary (e.g. `cargo run`).
+    ///
+    /// macOS's TCC Accessibility list resolves entries by bundle path
+    /// for `.app`s — pointing the user at the bundle and not at
+    /// `Contents/MacOS/flov_app` is the difference between the toggle
+    /// actually taking effect and it silently no-op'ing.
+    fn flov_app_bundle_path() -> std::path::PathBuf {
+        let exe = std::env::current_exe().unwrap_or_default();
+        // `<bundle>.app/Contents/MacOS/<exe>` → climb three parents to
+        // reach `<bundle>.app`.
+        let bundle = exe
+            .ancestors()
+            .find(|p| p.extension().map(|e| e == "app").unwrap_or(false));
+        bundle.map(|p| p.to_path_buf()).unwrap_or(exe)
+    }
+
+    /// Pop the Accessibility pane of System Settings via the standard
+    /// URL scheme. Same panel macOS itself opens from the (broken)
+    /// auto-prompt's button, just without the misleading entry.
+    fn open_accessibility_settings() {
+        let _ = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .spawn();
+    }
+
+    /// Carbon virtual key codes referenced from
+    /// `<HIToolbox/Events.h>`. The `core_graphics::event::KeyCode`
+    /// constants cover modifiers + a few special keys but stop short of
+    /// the ANSI letter/digit table, so we keep the full list here.
+    mod vk {
+        pub const COMMAND: u16 = 0x37;
+        pub const RIGHT_COMMAND: u16 = 0x36;
+        pub const SHIFT: u16 = 0x38;
+        pub const RIGHT_SHIFT: u16 = 0x3C;
+        pub const OPTION: u16 = 0x3A;
+        pub const RIGHT_OPTION: u16 = 0x3D;
+        pub const CONTROL: u16 = 0x3B;
+        pub const RIGHT_CONTROL: u16 = 0x3E;
+
+        pub const RETURN: u16 = 0x24;
+        pub const TAB: u16 = 0x30;
+        pub const SPACE: u16 = 0x31;
+        pub const DELETE: u16 = 0x33;
+        pub const FORWARD_DELETE: u16 = 0x75;
+        pub const ESCAPE: u16 = 0x35;
+    }
+
+    /// Parsed combo in macOS terms — produced from `HotkeyDef.combo`.
+    #[derive(Debug, Clone, Default)]
+    struct MacCombo {
+        required_flags: CGEventFlags,
+        trigger_keycodes: Vec<u16>,
+        /// True iff the trigger token is itself a modifier (e.g. binding
+        /// the right Option key as a single-key push-to-talk). When set,
+        /// we react on FlagsChanged instead of KeyDown / KeyUp.
+        trigger_is_modifier: bool,
+        /// Which flag bit toggles when the trigger fires. Used to decide
+        /// press vs release in FlagsChanged.
+        trigger_flag: CGEventFlags,
+    }
+
+    fn token_modifier_flag(tok: &str) -> Option<CGEventFlags> {
+        Some(match tok.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" | "lctrl" | "rctrl" => CGEventFlags::CGEventFlagControl,
+            "alt" | "menu" | "option" | "lalt" | "ralt" => CGEventFlags::CGEventFlagAlternate,
+            "shift" | "lshift" | "rshift" => CGEventFlags::CGEventFlagShift,
+            "win" | "meta" | "super" | "cmd" | "command" | "lwin" | "rwin" => {
+                CGEventFlags::CGEventFlagCommand
+            }
+            _ => return None,
+        })
+    }
+
+    fn token_modifier_keycodes(tok: &str) -> Option<Vec<u16>> {
+        Some(match tok.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => vec![vk::CONTROL, vk::RIGHT_CONTROL],
+            "lctrl" => vec![vk::CONTROL],
+            "rctrl" => vec![vk::RIGHT_CONTROL],
+            "alt" | "menu" | "option" => vec![vk::OPTION, vk::RIGHT_OPTION],
+            "lalt" => vec![vk::OPTION],
+            "ralt" => vec![vk::RIGHT_OPTION],
+            "shift" => vec![vk::SHIFT, vk::RIGHT_SHIFT],
+            "lshift" => vec![vk::SHIFT],
+            "rshift" => vec![vk::RIGHT_SHIFT],
+            "win" | "meta" | "super" | "cmd" | "command" => {
+                vec![vk::COMMAND, vk::RIGHT_COMMAND]
+            }
+            "lwin" => vec![vk::COMMAND],
+            "rwin" => vec![vk::RIGHT_COMMAND],
+            _ => return None,
+        })
+    }
+
+    /// ANSI letter / digit → Carbon virtual key code. Lifted from
+    /// `Events.h`. Layout-independent — these are physical key
+    /// positions, not the character produced by the user's layout, which
+    /// matches how the Windows hook works (`VK_A` is also the physical
+    /// A key position, regardless of dvorak / etc).
+    fn ansi_keycode(c: char) -> Option<u16> {
+        Some(match c.to_ascii_lowercase() {
+            'a' => 0x00, 'b' => 0x0B, 'c' => 0x08, 'd' => 0x02, 'e' => 0x0E,
+            'f' => 0x03, 'g' => 0x05, 'h' => 0x04, 'i' => 0x22, 'j' => 0x26,
+            'k' => 0x28, 'l' => 0x25, 'm' => 0x2E, 'n' => 0x2D, 'o' => 0x1F,
+            'p' => 0x23, 'q' => 0x0C, 'r' => 0x0F, 's' => 0x01, 't' => 0x11,
+            'u' => 0x20, 'v' => 0x09, 'w' => 0x0D, 'x' => 0x07, 'y' => 0x10,
+            'z' => 0x06,
+            '0' => 0x1D, '1' => 0x12, '2' => 0x13, '3' => 0x14, '4' => 0x15,
+            '5' => 0x17, '6' => 0x16, '7' => 0x1A, '8' => 0x1C, '9' => 0x19,
+            _ => return None,
+        })
+    }
+
+    fn token_trigger(tok: &str) -> Option<(Vec<u16>, Option<CGEventFlags>)> {
+        if let Some(codes) = token_modifier_keycodes(tok) {
+            let flag = token_modifier_flag(tok).unwrap_or(CGEventFlags::CGEventFlagNull);
+            return Some((codes, Some(flag)));
+        }
+        let lower = tok.to_ascii_lowercase();
+        let code = match lower.as_str() {
+            "space" => vk::SPACE,
+            "enter" | "return" => vk::RETURN,
+            "tab" => vk::TAB,
+            "esc" | "escape" => vk::ESCAPE,
+            "backspace" => vk::DELETE,
+            "delete" | "del" => vk::FORWARD_DELETE,
+            s if s.len() == 1 => {
+                let c = s.chars().next().unwrap();
+                ansi_keycode(c)?
+            }
+            _ => return None,
+        };
+        Some((vec![code], None))
+    }
+
+    impl MacCombo {
+        fn from_combo(combo: &str) -> Option<Self> {
+            let parts: Vec<&str> = combo
+                .split('+')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if parts.is_empty() {
+                return None;
+            }
+            let trigger_token = *parts.last().unwrap();
+            let modifier_tokens = &parts[..parts.len() - 1];
+
+            let mut required_flags = CGEventFlags::CGEventFlagNull;
+            for m in modifier_tokens {
+                required_flags |= token_modifier_flag(m)?;
+            }
+            let (trigger_keycodes, trigger_flag) = token_trigger(trigger_token)?;
+            let trigger_is_modifier = trigger_flag.is_some();
+            Some(MacCombo {
+                required_flags,
+                trigger_keycodes,
+                trigger_is_modifier,
+                trigger_flag: trigger_flag.unwrap_or(CGEventFlags::CGEventFlagNull),
+            })
+        }
+    }
+
+    static HOOK_STATE: OnceLock<HotkeyState> = OnceLock::new();
+    /// Active hotkey definition (Mac-specific encoding). `RwLock` so the
+    /// tap callback can `try_read` without blocking — same pattern as
+    /// the Windows hook (see comment on `HOOK_DEF` there). CGEventTap's
+    /// timeout is forgiving compared to LL hooks, but the cost is the
+    /// same one-liner.
+    static MAC_COMBO: RwLock<Option<MacCombo>> = RwLock::new(None);
+    /// Collapses press/release tracking inside the tap callback,
+    /// independent of `state.is_recording` (which belongs to the
+    /// recording_loop; see the Windows-side `TRIGGER_HELD` comment for
+    /// the wedge this prevents).
+    static TRIGGER_HELD: AtomicBool = AtomicBool::new(false);
+    /// Raw `CFMachPortRef` to the tap, stashed once we've successfully
+    /// created it. Used by the callback to re-arm via `CGEventTapEnable`
+    /// when macOS hits us with `TapDisabledByTimeout`. `AtomicPtr` so
+    /// we don't need a lock in the hot path.
+    static TAP_PORT: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+    static INSTALLED: Once = Once::new();
+
+    pub fn set_hotkey_def(def: HotkeyDef) {
+        let mac = MacCombo::from_combo(&def.combo);
+        if mac.is_none() {
+            tracing::warn!("hotkey '{}' has no macOS mapping", def.combo);
+        }
+        if let Ok(mut g) = MAC_COMBO.write() {
+            *g = mac;
+        }
+    }
+
+    pub fn install_hook(state: HotkeyState) -> anyhow::Result<HookGuard> {
+        let _ = HOOK_STATE.set(state);
+
+        // We deliberately do NOT pass `prompt=true` here. macOS's
+        // auto-prompt has a long-standing bug (still present on Sonoma
+        // 14.x / Sequoia 15.x) where, for an unsigned .app bundle, the
+        // resulting TCC entry points at the executable file
+        // (.../Contents/MacOS/flov_app) instead of the bundle, so even
+        // after the user flips the toggle on, AXIsProcessTrusted keeps
+        // returning false and the tap stays dead.
+        //
+        // The reliable path is: tell the user what's missing, open
+        // System Settings on the right pane, and let them drag the
+        // .app in manually via the "+" button — TCC then registers the
+        // bundle path/id correctly and toggling the entry sticks.
+        let trusted = accessibility_check(false);
+        if !trusted {
+            tracing::warn!(
+                "Accessibility permission not granted. Opening System Settings — \
+                 add this .app manually via '+' (do NOT trust the auto-prompt's \
+                 entry, it points at the wrong path on unsigned builds): {}",
+                flov_app_bundle_path().display()
+            );
+            open_accessibility_settings();
+        }
+
+        // The tap is installed exactly once — re-binding the combo just
+        // updates MAC_COMBO, which the live callback re-reads on every
+        // event. We still spawn the thread even without permission so the
+        // log explains *why* nothing happens; CGEventTapCreate returns
+        // NULL inside and we log the same hint.
+        INSTALLED.call_once(|| {
+            std::thread::Builder::new()
+                .name("flov-hotkey-tap".into())
+                .spawn(tap_thread)
+                .expect("spawn hotkey tap thread");
+        });
+
+        Ok(HookGuard { _phantom: () })
+    }
+
+    fn tap_thread() {
+        let tap = match CGEventTap::new(
+            CGEventTapLocation::HID,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            vec![
+                CGEventType::KeyDown,
+                CGEventType::KeyUp,
+                CGEventType::FlagsChanged,
+            ],
+            tap_callback,
+        ) {
+            Ok(t) => t,
+            Err(_) => {
+                tracing::error!(
+                    "CGEventTapCreate failed — flov needs Accessibility \
+                     permission. Open System Settings → Privacy & Security \
+                     → Accessibility and enable flov."
+                );
+                return;
+            }
+        };
+
+        // Stash the raw mach-port so the callback can re-enable the tap
+        // after macOS suspends it (TapDisabledByTimeout fires when the
+        // callback is too slow, TapDisabledByUserInput on every Cmd+Tab
+        // or password-prompt-like UI). Both deactivate the tap until
+        // we explicitly re-enable it.
+        TAP_PORT.store(
+            tap.mach_port.as_concrete_TypeRef() as *mut _,
+            Ordering::SeqCst,
+        );
+
+        unsafe {
+            let source = match tap.mach_port.create_runloop_source(0) {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::error!("create_runloop_source failed");
+                    return;
+                }
+            };
+            CFRunLoop::get_current().add_source(&source, kCFRunLoopCommonModes);
+        }
+        tap.enable();
+        tracing::info!("macOS hotkey tap installed");
+        CFRunLoop::run_current();
+    }
+
+    fn tap_callback(
+        _proxy: core_graphics::event::CGEventTapProxy,
+        etype: CGEventType,
+        event: &core_graphics::event::CGEvent,
+    ) -> Option<core_graphics::event::CGEvent> {
+        // Self-healing: the OS hands these two pseudo-events to a tap
+        // when it deactivates it. Re-enable so the hotkey keeps working
+        // through long sessions, Cmd+Tabs, security UIs, etc. We swallow
+        // them either way (returning `None` passes the original event
+        // through, which is fine — they're synthetic and have no payload
+        // an app could react to).
+        match etype {
+            CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
+                let port = TAP_PORT.load(Ordering::SeqCst)
+                    as core_foundation::mach_port::CFMachPortRef;
+                if !port.is_null() {
+                    unsafe { CGEventTapEnable(port, true) };
+                    tracing::warn!("CGEventTap re-enabled after {:?}", etype);
+                }
+                return None;
+            }
+            _ => {}
+        }
+
+        let state = match HOOK_STATE.get() {
+            Some(s) => s,
+            None => return None,
+        };
+        // `try_read`: if the UI is mid-swap of the combo, fall through
+        // to pass-through rather than wait. CGEventTap is more tolerant
+        // than Windows' LL hook but the principle is the same — never
+        // block the hot path.
+        let combo = {
+            let guard = match MAC_COMBO.try_read() {
+                Ok(g) => g,
+                Err(_) => return None,
+            };
+            match guard.as_ref() {
+                Some(c) => c.clone(),
+                None => return None,
+            }
+        };
+        let vk = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
+        let flags = event.get_flags();
+
+        match (etype, combo.trigger_is_modifier) {
+            // Non-modifier trigger (e.g. Cmd+Alt+Space).
+            (CGEventType::KeyDown, false) => {
+                if combo.trigger_keycodes.contains(&vk)
+                    && flags.contains(combo.required_flags)
+                {
+                    // `TRIGGER_HELD` collapses macOS's KEYDOWN auto-repeat
+                    // into a single arm event — same as the Windows hook.
+                    // We deliberately do NOT consult `state.is_recording`
+                    // here: recording_loop manages that flag and using it
+                    // as a gate caused a wedge on Windows (see Gotchas
+                    // section of CLAUDE.md). Same trap on macOS.
+                    if !TRIGGER_HELD.load(Ordering::SeqCst) {
+                        TRIGGER_HELD.store(true, Ordering::SeqCst);
+                        state.active_mode.store(MODE_TRANSCRIBE, Ordering::SeqCst);
+                    }
+                }
+            }
+            (CGEventType::KeyUp, false) => {
+                if combo.trigger_keycodes.contains(&vk)
+                    && TRIGGER_HELD.load(Ordering::SeqCst)
+                {
+                    TRIGGER_HELD.store(false, Ordering::SeqCst);
+                    state.active_mode.store(MODE_IDLE, Ordering::SeqCst);
+                }
+            }
+
+            // Modifier trigger (e.g. Cmd+Alt, where the trigger token
+            // "Alt"/Option is itself a modifier — the press is detected
+            // via FlagsChanged + the bit transitioning from clear to set).
+            (CGEventType::FlagsChanged, true) => {
+                if !combo.trigger_keycodes.contains(&vk) {
+                    return None;
+                }
+                let pressed = flags.contains(combo.trigger_flag);
+                // required_flags excludes the trigger flag itself —
+                // we strip it before checking because at press time
+                // it's about to become set.
+                let other_required = combo.required_flags & !combo.trigger_flag;
+                let held = TRIGGER_HELD.load(Ordering::SeqCst);
+                if pressed && !held && flags.contains(other_required) {
+                    TRIGGER_HELD.store(true, Ordering::SeqCst);
+                    state.active_mode.store(MODE_TRANSCRIBE, Ordering::SeqCst);
+                } else if !pressed && held {
+                    TRIGGER_HELD.store(false, Ordering::SeqCst);
+                    state.active_mode.store(MODE_IDLE, Ordering::SeqCst);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
 // ─── Linux ──────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -458,6 +923,9 @@ mod linux_impl {
 
 #[cfg(target_os = "windows")]
 pub use windows_impl::{install_hook, set_hotkey_def};
+
+#[cfg(target_os = "macos")]
+pub use macos_impl::{install_hook, set_hotkey_def};
 
 #[cfg(target_os = "linux")]
 pub use linux_impl::{install_hook, set_hotkey_def};

@@ -29,6 +29,17 @@ $targetDir = Join-Path $root "target"
 $binDir = Join-Path $root "src-tauri\binaries"
 $runtimeDir = Join-Path $binDir "runtime"
 
+# Same Windows-only build env as in build-sidecars.ps1 — needed because
+# this script also invokes cargo directly (Build-Sidecar function below).
+$env:CMAKE_GENERATOR = "Ninja"
+$env:CMAKE_MAKE_PROGRAM = "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
+$env:CMAKE_GENERATOR_INSTANCE = ""
+$env:CUDAFLAGS = "-allow-unsupported-compiler"
+$env:CMAKE_CUDA_FLAGS = "-allow-unsupported-compiler -Xcompiler /Zc:preprocessor"
+$env:CXXFLAGS = "/Zc:preprocessor"
+$env:CFLAGS = "/Zc:preprocessor"
+$env:CCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING = "1"
+
 # Tauri's externalBin convention: file must be named `<name>-<triple>.exe`,
 # and gets renamed to `<name>.exe` at install time.
 $triple = "x86_64-pc-windows-msvc"

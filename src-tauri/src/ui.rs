@@ -1,5 +1,7 @@
 //! Tauri UI glue: window positioning, click-through, polished-pill handshake.
 
+#![allow(dead_code)]
+
 use std::sync::Mutex;
 
 /// Buffered final text waiting for the polished-pill animation to finish
@@ -149,6 +151,56 @@ pub fn force_repaint(window: &tauri::WebviewWindow) {
             SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
         );
     }
+}
+
+/// Position the pill at the bottom-center of the screen the cursor is
+/// currently on. macOS coordinate space matches what Tauri's
+/// LogicalPosition expects (top-left origin, points) — no Y flip
+/// needed because CGEventGetLocation and CGDisplayBounds both use
+/// global display coordinates anchored to the upper-left corner.
+#[cfg(target_os = "macos")]
+pub fn position_at_cursor_monitor(window: &tauri::WebviewWindow) {
+    use core_graphics::display::CGDisplay;
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let src = match CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let cursor = match CGEvent::new(src) {
+        Ok(e) => e.location(),
+        Err(_) => return,
+    };
+
+    let displays = match CGDisplay::active_displays() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    let containing = displays
+        .into_iter()
+        .map(CGDisplay::new)
+        .find(|d| {
+            let b = d.bounds();
+            cursor.x >= b.origin.x
+                && cursor.x < b.origin.x + b.size.width
+                && cursor.y >= b.origin.y
+                && cursor.y < b.origin.y + b.size.height
+        })
+        .unwrap_or_else(|| CGDisplay::new(CGDisplay::main().id));
+    let mon = containing.bounds();
+
+    // Pill dimensions in *logical* units (= macOS points). Tauri's
+    // window config (tauri.conf.json) lists 800×200 in the same units,
+    // so no scale-factor multiplication is needed here — unlike the
+    // Windows path where rcMonitor is in physical pixels.
+    let pill_w: f64 = 800.0;
+    let pill_h: f64 = 200.0;
+    let margin_bottom: f64 = 24.0;
+    let x = mon.origin.x + (mon.size.width - pill_w) / 2.0;
+    let y = mon.origin.y + mon.size.height - pill_h - margin_bottom;
+    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
 }
 
 /// Frontend tells us its polished-pill animation is done — paste the buffered

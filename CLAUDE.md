@@ -1,10 +1,15 @@
 # Flov - Voice to Text Assistant
 
-Windows push-to-talk: зажимаешь хоткей (по умолчанию Ctrl+Win), говоришь,
-отпускаешь — текст вставляется в активное поле через буфер обмена (Ctrl+V).
+Push-to-talk на Windows и macOS (Apple Silicon): зажимаешь хоткей,
+говоришь, отпускаешь — текст вставляется в активное поле через буфер
+обмена (Ctrl+V на Windows / Cmd+V на маке).
+
+Дефолтный хоткей: `Ctrl+Win` на Windows, `Cmd+Alt` на macOS — выбран
+через `cfg(target_os)` в `config.rs::default_hotkey_combo()`.
 
 UI: Tauri 2 webview с Svelte 5. Frontend рендерит Mac-style капсулу-pill у
-курсора с морф-анимацией. Backend: Rust, Win32 хук клавиатуры + cpal для
+курсора с морф-анимацией. Backend: Rust, платформенный keyboard hook
+(Win32 `WH_KEYBOARD_LL` / macOS `CGEventTap` / Linux `evdev`) + cpal для
 записи + spawn sidecar для транскрипции.
 
 ## Layout
@@ -18,33 +23,40 @@ flov/
 ├── docs/DESIGN.md      # дизайн-нотки по pill / settings
 ├── src-tauri/          # main app (flov_app.exe)
 │   ├── Cargo.toml
-│   ├── tauri.conf.json # 2 окна: main (pill, frameless transparent) + settings (1240×880, frameless)
+│   ├── tauri.conf.json         # cross-platform базовый конфиг (окна, иконки, build)
+│   ├── tauri.windows.conf.json # Windows-only: NSIS bundle, externalBin cpu+vulkan
+│   ├── tauri.macos.conf.json   # macOS-only: .app/.dmg targets, macOSPrivateApi
+│   ├── Info.plist              # macOS Info.plist patch — NSMicrophoneUsageDescription + LSUIElement
 │   ├── icons/          # tray.png (32x32, чёрный глиф; tray.rs.invert на dark theme)
 │   ├── capabilities/   # Tauri 2 permissions (settings.json — для settings window)
 │   └── src/
 │       ├── main.rs        # entry, вызывает flov_lib::run
 │       ├── lib.rs         # оркестрация: загрузка config, инициализация Recorder/Transcriber/HotkeyHook,
 │       │                  # spawn recording_loop, Tauri Builder
-│       ├── audio.rs       # WASAPI запись через cpal, ресемплинг 16kHz, FFT-спектр для оверлея
-│       ├── hotkey.rs      # глобальный WH_KEYBOARD_LL хук, парсер combo строк (Ctrl+Win, RCtrl и т.д.),
-│       │                  # live re-bind через static Mutex<Option<HotkeyDef>>
-│       ├── input.rs       # вставка через clipboard + SendInput Ctrl+V
+│       ├── audio.rs       # WASAPI/CoreAudio запись через cpal, ресемплинг 16kHz, FFT-спектр для оверлея
+│       ├── hotkey.rs      # глобальный keyboard hook (Win32 WH_KEYBOARD_LL / macOS CGEventTap / Linux evdev),
+│       │                  # парсер combo строк (Ctrl+Win, Cmd+Alt, RCtrl и т.д.), live re-bind
+│       ├── input.rs       # вставка через clipboard + paste hotkey (Win32 SendInput Ctrl+V /
+│       │                  # macOS CGEventPost Cmd+V + arboard / Linux wl-copy + wtype)
+│       ├── paths.rs       # user data dir: Win=exe_dir, macOS=~/Library/Application Support/com.flov.app/,
+│       │                  # Linux=$XDG_DATA_HOME/flov/. flov.toml/stats.json/models/ всё через него
 │       ├── transcribe.rs  # spawn sidecar (Command::new), pipe f32 PCM в stdin, читает stdout
 │       ├── postprocess.rs # OpenRouter API (опционально, тогл из settings); логирует HTTP status/body
 │       ├── config.rs      # flov.toml parser, surgical write через toml_edit (сохраняет коментарии)
-│       ├── tray.rs        # Tauri 2 native tray (Open Settings / Quit), theme-aware иконка, multi-state
-│       ├── ui.rs          # Tauri commands + Win32 helpers (position_at_cursor_monitor,
-│       │                  # force_click_through, disable_native_window_rounding для settings)
+│       ├── tray.rs        # Tauri 2 native tray (Open Settings / Quit), theme-aware иконка
+│       │                  # на Windows (registry poll), template image на macOS (auto-tint)
+│       ├── ui.rs          # Tauri commands + per-platform window helpers
+│       │                  # (position_at_cursor_monitor: Win32 MonitorFromPoint / macOS CGDisplay)
 │       ├── models.rs      # каталог Whisper моделей (tiny..large-v3-turbo)
 │       ├── models_cmd.rs  # Tauri commands для скачивания / выбора модели
 │       ├── state_cmd.rs   # Tauri commands для backend / postprocess / hotkey / stats settings
 │       └── stats.rs       # JSON-лог записей по дням (для heatmap)
 ├── crates/             # sidecar transcription backends (см. crates/README.md)
-│   ├── README.md       # архитектура sidecars + полный гайд для Mac/Metal sidecar
+│   ├── README.md       # архитектура sidecars + Mac/Metal гайд (исторический)
 │   ├── flov-whisper-cuda/    # NVIDIA, whisper-rs feature cuda
 │   ├── flov-whisper-vulkan/  # AMD/Intel iGPU, whisper-rs feature vulkan
 │   ├── flov-whisper-cpu/     # fallback
-│   └── flov-whisper-metal/   # Apple Silicon (ещё не создан, гайд в crates/README.md)
+│   └── flov-whisper-metal/   # Apple Silicon (whisper-rs feature metal)
 ├── ui/                 # SvelteKit (adapter-static, port 1420)
 │   └── src/
 │       ├── routes/
@@ -59,9 +71,16 @@ flov/
 │           │                       # per-line desync (phase/freq/speed), opacity-controlled visibility,
 │           │                       # stroke-dashoffset для left-to-right reveal
 │           └── settings/           # Models / Backend / Postprocess / Stats компоненты
-└── scripts/
-    └── build-sidecars.ps1  # билдит все crates/flov-whisper-*, копирует в target/{debug,release}/
-                             # + cublas DLLs для CUDA
+├── scripts/
+│   ├── build-sidecars.ps1   # билдит sidecars на Windows (cpu/vulkan/cuda)
+│   ├── build-sidecars.sh    # билдит sidecars на macOS (cpu/metal)
+│   ├── build-bundle.ps1     # NSIS installer (Windows)
+│   └── build-bundle.sh      # .app + .dmg (macOS Apple Silicon)
+├── dev.cmd                  # Windows hot-reload entry
+├── dev.sh                   # macOS/Linux hot-reload entry (стейджит sidecars)
+└── docs/
+    ├── DESIGN.md
+    └── MACOS.md              # детали macOS port (permissions, дефолтный хоткей, paths)
 ```
 
 ## Транскрипция через sidecars
@@ -327,6 +346,110 @@ Helt-and-suspenders сверх occlusion fix. WebView2 renderer leak'ит memory
 если JS listener fall'ит behind, очередь IPC растёт и в итоге выглядит
 как зависание. Снизили до 60 мс (16 Hz) — wave выглядит так же гладко,
 а IPC traffic вдвое меньше.
+
+### macOS unsigned-app + TCC: первый запуск = боль (mac)
+
+**Главное правило**: на macOS любая capture-keyboard / global-paste
+функциональность требует **Accessibility** permission, любой mic
+capture — **Microphone** permission. Юзер выдаёт оба руками. Это
+*невозможно* обойти из кода — это намеренный Apple security boundary.
+
+Конкретные подводные грабли, на которые мы уже наступили:
+
+**`AXIsProcessTrustedWithOptions(prompt=true)` ломает TCC для unsigned
+app**. Apple API должен показать "Allow flov to control your computer"
+диалог. Для unsigned билдов он показывает диалог, но запись в TCC
+указывает на executable (`flov.app/Contents/MacOS/flov_app`), не на
+bundle. Toggle вроде включён — но `AXIsProcessTrusted` возвращает
+false навсегда. **Fix**: вызываем с `prompt=false`, открываем System
+Settings → Accessibility через `open
+"x-apple.systempreferences:..."` и логируем "add manually via +".
+См. `hotkey.rs::macos_impl::install_hook`.
+
+**Ad-hoc signing (`signingIdentity: "-"`) НЕ стабилизирует TCC между
+rebuilds**. Был соблазн думать "ad-hoc даёт стабильный identity →
+TCC entries persist". **Неправда**: ad-hoc signing у каждого rebuild
+свой `cdhash`, и TCC keys на cdhash для anything без TeamIdentifier.
+Только Developer ID Application certificate ($99/год Apple Dev
+Program) даёт TeamIdentifier, по которому TCC матчит rebuild'ы как
+"то же приложение". Ad-hoc реально даёт только: hardened-runtime
+ready, notarization-ready, чуть лучший Gatekeeper UX. Не больше.
+
+**`cpal::default_input_config()` блокирует** до того как юзер
+ответит на mic permission диалог. На первом запуске между "INFO
+Using input device" и "INFO Audio config" может пройти 1-3 минуты
+(юзер не сразу видит диалог). Это норма, не зависание.
+
+**TCC keys на полный path .app bundle**. Запуск из `/Volumes/flov/`
+(смонтированный DMG) и `/Applications/flov.app` — две разные TCC
+entries. После drag .app из DMG в Applications → permission grants
+делать снова. Тоже — если двигаешь .app между папками.
+
+**LSUIElement = true делает приложение menu-bar-only** (нет Dock
+иконки, нет app menu). На первом запуске новичок может не понять
+что приложение вообще запустилось. Иконка маленькая, в верхнем
+правом углу экрана. Если хочется лучше UX onboarding'а — нужно
+временно убрать LSUIElement или показывать Settings window на первом
+запуске (флаг "first-run" в `flov.toml` → forced show).
+
+**Gatekeeper "unknown developer" warning**: на unsigned первый
+запуск открывает System Settings → Privacy & Security, внизу
+"Open Anyway". Single click. Не повторяется. Notarization ($99/год)
+убирает полностью.
+
+**После каждого `tauri build` юзер должен заново выдать permissions**
+(для unsigned билдов). Это значит для dev iteration:
+- Установка через `cp -R target/release/bundle/macos/flov.app /Applications/`
+- `tccutil reset Accessibility com.flov.app && tccutil reset Microphone com.flov.app`
+- Запуск, выдача grants, restart
+
+Делать пользователю — невыносимо. **Реально для production:**
+- Apple Developer Program → Developer ID cert → `bundle.macOS.signingIdentity` указать его
+- `xcrun notarytool submit ... --apple-id ... --team-id ... --password ...`
+- `xcrun stapler staple flov.app` для embed notarization
+- Тогда: drag в Applications → запуск → 2 permission диалога → готово,
+  TCC persists через rebuilds.
+
+### macOS SDK / deployment target dyld pitfall (mac)
+
+Apple SDK 15+ добавляет `MTLResidencySetDescriptor` в Metal. whisper.cpp
+безопасно гард'ит вызов через `@available(macOS 15.0, *)`, но без
+явного deployment target клас линкается как **required** не **weak**
+symbol. Билд против SDK 15 на Sonoma 14.x crash'ится при загрузке:
+```
+dyld: Symbol not found: _OBJC_CLASS_$_MTLResidencySetDescriptor
+```
+
+Sidecar умирает молча, родительский Rust код видит broken pipe при
+write в его stdin: `failed to write samples to sidecar`. Симптом
+выглядит как баг IPC, на самом деле — динамический линкер.
+
+Три env vars в `scripts/build-sidecars.sh` / `build-bundle.sh`
+решают это для macOS:
+1. `MACOSX_DEPLOYMENT_TARGET=11.0` — clang добавляет `-mmacosx-version-min=11.0`
+2. `CMAKE_OSX_DEPLOYMENT_TARGET=11.0` — whisper-rs-sys's build.rs форвардит
+   env vars с префиксом `CMAKE_` в cmake; `cmake-rs` сам не транслирует
+   MACOSX_DEPLOYMENT_TARGET → CMAKE_OSX_DEPLOYMENT_TARGET
+3. `RUSTFLAGS="-L<clang_rt_dir> -lclang_rt.osx"` — clang генерит
+   runtime call `__isPlatformVersionAtLeast` для `@available()`, который
+   живёт в `libclang_rt.osx.a`. Apple's clang auto-линкует, rustc — нет.
+   Путь через `clang -print-runtime-dir`.
+
+### CGEventTap на macOS не выживает long sessions без re-enable (mac)
+
+Симметрично Windows-side LL hook timeout. macOS присылает в tap
+callback pseudo-events `TapDisabledByTimeout` (когда callback тупит)
+или `TapDisabledByUserInput` (на Cmd+Tab, password prompts и т.п.).
+Tap **остаётся disabled** пока мы явно не вызовем `CGEventTapEnable`.
+
+Fix в `hotkey.rs::macos_impl::tap_callback`: на эти event types
+вызываем `CGEventTapEnable(port, true)` через raw FFI + `AtomicPtr<c_void>`
+со stashed `CFMachPortRef`. Без этого хоткей умирает после первого
+Cmd+Tab.
+
+Аналогично Windows-side: `TRIGGER_HELD` AtomicBool отдельно от
+`state.is_recording` (recording_loop сам управляет своим флагом),
+`RwLock<MacCombo>` + `try_read` вместо Mutex.
 
 ## Зависимости (src-tauri/Cargo.toml)
 

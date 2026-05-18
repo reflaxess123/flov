@@ -139,6 +139,71 @@ mod windows_impl {
     }
 }
 
+// ─── macOS ──────────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+mod macos_impl {
+    //! Paste = `arboard` clipboard set + synthetic Cmd+V via CGEventPost.
+    //! Needs Accessibility permission (same TCC bucket as the hotkey
+    //! event tap).
+
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    /// kVK_ANSI_V from `<HIToolbox/Events.h>`.
+    const KVK_ANSI_V: u16 = 0x09;
+
+    pub fn get_clipboard() -> Option<String> {
+        // `arboard::Clipboard::new` allocates an NSPasteboard handle each
+        // call — fine for the once-per-transcription frequency.
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => cb.get_text().ok(),
+            Err(e) => {
+                tracing::warn!("clipboard open failed: {}", e);
+                None
+            }
+        }
+    }
+
+    pub fn type_text(text: &str) {
+        if let Err(e) = set_clipboard_text(text) {
+            tracing::error!("clipboard set failed: {:#}", e);
+            return;
+        }
+        if let Err(e) = post_cmd_v() {
+            tracing::error!(
+                "Cmd+V post failed (likely missing Accessibility \
+                 permission): {:#}",
+                e
+            );
+        }
+    }
+
+    fn set_clipboard_text(text: &str) -> anyhow::Result<()> {
+        let mut cb = arboard::Clipboard::new()
+            .map_err(|e| anyhow::anyhow!("Clipboard::new: {}", e))?;
+        cb.set_text(text.to_string())
+            .map_err(|e| anyhow::anyhow!("set_text: {}", e))
+    }
+
+    fn post_cmd_v() -> anyhow::Result<()> {
+        // HIDSystemState = same level as a real keypress; combined-session
+        // states drop modifier flags before delivery, which breaks Cmd+V.
+        let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
+        let down = CGEvent::new_keyboard_event(src.clone(), KVK_ANSI_V, true)
+            .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event(down) failed"))?;
+        down.set_flags(CGEventFlags::CGEventFlagCommand);
+        down.post(CGEventTapLocation::HID);
+
+        let up = CGEvent::new_keyboard_event(src, KVK_ANSI_V, false)
+            .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event(up) failed"))?;
+        up.set_flags(CGEventFlags::CGEventFlagCommand);
+        up.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+}
+
 // ─── Linux ──────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -193,6 +258,9 @@ mod linux_impl {
 
 #[cfg(target_os = "windows")]
 pub use windows_impl::{get_clipboard, type_text};
+
+#[cfg(target_os = "macos")]
+pub use macos_impl::{get_clipboard, type_text};
 
 #[cfg(target_os = "linux")]
 pub use linux_impl::{get_clipboard, type_text};

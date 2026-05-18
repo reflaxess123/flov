@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "externalBin": [
+      "binaries/flov-whisper-cpu",
+      "binaries/flov-whisper-metal"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "frameworks": [],
+      "entitlements": "entitlements.plist",
+      "exceptionDomain": null,
+      "signingIdentity": "-"
+    }
+  },
+  "app": {
+    "macOSPrivateApi": true
+  }
+}

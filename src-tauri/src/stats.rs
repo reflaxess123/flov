@@ -100,12 +100,7 @@ impl Stats {
 }
 
 fn stats_path() -> Result<PathBuf> {
-    let exe_dir = std::env::current_exe()
-        .context("current_exe failed")?
-        .parent()
-        .context("no parent")?
-        .to_path_buf();
-    Ok(exe_dir.join("stats.json"))
+    crate::paths::stats_path()
 }
 
 /// `YYYY-MM-DD` in UTC. Avoids a chrono dependency by computing manually.

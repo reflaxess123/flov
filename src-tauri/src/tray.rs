@@ -132,7 +132,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 
     let initial_dark = windows_uses_dark_theme();
 
-    TrayIconBuilder::with_id(TRAY_ID)
+    let builder = TrayIconBuilder::with_id(TRAY_ID)
         .icon(load_themed_icon(initial_dark))
         .tooltip(TrayState::Idle.tooltip())
         .menu(&menu)
@@ -147,26 +147,42 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 }
             }
             _ => {}
-        })
-        .build(app)?;
+        });
 
-    // Poll the theme key. Windows broadcasts WM_SETTINGCHANGE on theme switch
-    // but we don't (yet) hook the message loop, so a 3 s poll is the cheap
-    // path to "tray icon recolors when theme changes".
-    let app_for_poll = app.clone();
-    std::thread::spawn(move || {
-        let mut current = initial_dark;
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            let now = windows_uses_dark_theme();
-            if now != current {
-                current = now;
-                if let Some(tray) = app_for_poll.tray_by_id(TRAY_ID) {
-                    let _ = tray.set_icon(Some(load_themed_icon(now)));
+    // On macOS the OS handles tinting for template images: a B&W glyph
+    // with alpha gets painted in the current menu-bar color (which
+    // tracks light/dark automatically). Our tray.png is already that
+    // shape, so we just flag it template and skip the Windows polling
+    // thread entirely.
+    #[cfg(target_os = "macos")]
+    let builder = builder.icon_as_template(true);
+
+    builder.build(app)?;
+
+    // Theme-tracking poll only matters on Windows — that's where we
+    // hand-recolor the icon based on a registry value. macOS template
+    // images recolor themselves; Linux has no equivalent surface.
+    #[cfg(target_os = "windows")]
+    {
+        let app_for_poll = app.clone();
+        std::thread::spawn(move || {
+            let mut current = initial_dark;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                let now = windows_uses_dark_theme();
+                if now != current {
+                    current = now;
+                    if let Some(tray) = app_for_poll.tray_by_id(TRAY_ID) {
+                        let _ = tray.set_icon(Some(load_themed_icon(now)));
+                    }
                 }
             }
-        }
-    });
+        });
+    }
+    // Use the variable on non-Windows to silence unused-var warnings
+    // when the polling loop is compiled out.
+    #[cfg(not(target_os = "windows"))]
+    let _ = initial_dark;
 
     Ok(())
 }

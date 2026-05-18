@@ -5,6 +5,7 @@ pub mod hotkey;
 pub mod input;
 pub mod models;
 pub mod models_cmd;
+pub mod paths;
 pub mod postprocess;
 pub mod state_cmd;
 pub mod stats;
@@ -30,10 +31,18 @@ fn init_logging() {
     use std::path::PathBuf;
     use tracing_subscriber::EnvFilter;
 
-    let log_path: PathBuf = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.join("flov.log")))
-        .unwrap_or_else(|| PathBuf::from("flov.log"));
+    // Per-platform user data dir (see `paths.rs`): on Windows the
+    // installer puts the exe under %LOCALAPPDATA% which is writable so
+    // exe-relative would work too — but on macOS the .app bundle is
+    // read-only after code-signing and we must write to
+    // `~/Library/Application Support/com.flov.app/`. Falling back to
+    // the binary's directory keeps behaviour sane if `HOME` is unset.
+    let log_path: PathBuf = paths::log_path().unwrap_or_else(|_| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join("flov.log")))
+            .unwrap_or_else(|| PathBuf::from("flov.log"))
+    });
 
     let file = OpenOptions::new()
         .create(true)
@@ -130,10 +139,19 @@ pub fn run() {
     let _hook = hotkey::install_hook(hotkey_state).expect("hotkey hook failed");
 
     // Set the initial hotkey definition; Tauri command can swap it later.
+    // Fallback combo is per-platform so Mac users don't get Ctrl+Cmd (=
+    // collides with system shortcuts like Ctrl+Cmd+Q lock screen).
+    #[cfg(target_os = "macos")]
+    let fallback_combo = "Cmd+Alt";
+    #[cfg(not(target_os = "macos"))]
+    let fallback_combo = "Ctrl+Win";
     let initial_def = hotkey::HotkeyDef::parse(&cfg.hotkey.combo)
         .unwrap_or_else(|e| {
-            tracing::warn!("invalid hotkey '{}': {}, falling back to Ctrl+Win", cfg.hotkey.combo, e);
-            hotkey::HotkeyDef::parse("Ctrl+Win").unwrap()
+            tracing::warn!(
+                "invalid hotkey '{}': {}, falling back to {}",
+                cfg.hotkey.combo, e, fallback_combo
+            );
+            hotkey::HotkeyDef::parse(fallback_combo).unwrap()
         });
     tracing::info!("hotkey: {}", initial_def.combo);
     hotkey::set_hotkey_def(initial_def);
@@ -351,7 +369,7 @@ fn recording_loop(
         let model_present = transcriber.has_model();
         if !model_present {
             if let Some(window) = app.get_webview_window("main") {
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
                 ui::position_at_cursor_monitor(&window);
                 let _ = window.show();
             }
@@ -370,7 +388,7 @@ fn recording_loop(
         // wrong monitor.
         match app.get_webview_window("main") {
             Some(window) => {
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
                 ui::position_at_cursor_monitor(&window);
                 if let Err(e) = window.show() {
                     tracing::warn!("pill window.show() failed: {}", e);
@@ -381,6 +399,9 @@ fn recording_loop(
                 // surface, so the user sees nothing even though
                 // `show()` and the subsequent `emit` both succeeded.
                 // See `ui::force_repaint` docs for the full story.
+                // macOS WKWebView doesn't have the equivalent DWM
+                // layered-surface staleness issue, so the call is
+                // Windows-only.
                 #[cfg(target_os = "windows")]
                 ui::force_repaint(&window);
             }

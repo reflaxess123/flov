@@ -97,16 +97,12 @@ fn url_for(filename: &str) -> String {
     format!("{}/{}", HF_BASE, filename)
 }
 
-/// Where downloaded models live: `<exe_dir>/models/<family>/`.
+/// Where downloaded models live — `<user_data_dir>/models/<family>/`.
+/// See `crate::paths::user_data_dir` for the platform-specific layout
+/// (this used to be next to the exe on every OS but that breaks on
+/// macOS where the .app bundle is read-only after code-signing).
 pub fn models_dir(family: &str) -> Result<PathBuf> {
-    let exe = std::env::current_exe().context("current_exe failed")?;
-    let dir = exe
-        .parent()
-        .context("current_exe has no parent")?
-        .join("models")
-        .join(family);
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {:?}", dir))?;
-    Ok(dir)
+    crate::paths::models_dir(family)
 }
 
 pub fn local_path(entry: &CatalogEntry) -> Result<PathBuf> {

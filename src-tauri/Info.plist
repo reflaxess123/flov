@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Custom Info.plist keys merged into the generated bundle Info.plist
+  during `tauri build` (tauri-bundler walks src-tauri/ for this file).
+
+  - NSMicrophoneUsageDescription — required for the cpal/CoreAudio
+    capture stream. Without this string, macOS silently denies
+    microphone access and we'd get a silent recording.
+  - LSUIElement — agent mode. No Dock icon, no app menu bar; flov
+    lives in the menu bar status item (tray) only.
+-->
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Flov captures audio while you hold the hotkey to transcribe it locally on-device. Audio never leaves your machine unless you've configured the optional OpenRouter post-processing step.</string>
+
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

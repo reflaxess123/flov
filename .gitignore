@@ -17,3 +17,4 @@ flov.toml
 /src-tauri/tauri.bundle.conf.json
 # Local source for tauri icon regen
 /icon-source.png
+/icon-source_new.png

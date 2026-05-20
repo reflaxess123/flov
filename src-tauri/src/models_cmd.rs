@@ -58,11 +58,7 @@ pub fn set_active_model(id: String, state: State<ModelState>) -> Result<(), Stri
 /// Kick off a download on a worker thread. Returns immediately; progress
 /// flows over `model-progress` events keyed by `id`.
 #[tauri::command]
-pub fn download_model(
-    id: String,
-    state: State<ModelState>,
-    app: AppHandle,
-) -> Result<(), String> {
+pub fn download_model(id: String, state: State<ModelState>, app: AppHandle) -> Result<(), String> {
     let url = models::entry_url(&id).map_err(|e| e.to_string())?;
     let dest = models::entry_local_path(&id).map_err(|e| e.to_string())?;
     let expected_size = models::entry_size(&id).map_err(|e| e.to_string())?;
@@ -197,12 +193,5 @@ fn run_download(
 
 #[tauri::command]
 pub fn show_models_window(app: AppHandle) -> Result<(), String> {
-    use tauri::Manager;
-    if let Some(window) = app.get_webview_window("settings") {
-        window.show().map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())?;
-    } else {
-        return Err("settings window not configured".into());
-    }
-    Ok(())
+    crate::ui::open_settings_window(&app).map_err(|e| e.to_string())
 }

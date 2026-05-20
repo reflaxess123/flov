@@ -52,8 +52,7 @@ impl Stats {
     pub fn open() -> Result<Self> {
         let path = stats_path()?;
         let inner = if path.exists() {
-            let s = std::fs::read_to_string(&path)
-                .with_context(|| format!("read {:?}", path))?;
+            let s = std::fs::read_to_string(&path).with_context(|| format!("read {:?}", path))?;
             serde_json::from_str(&s).unwrap_or_default()
         } else {
             StatsFile::default()

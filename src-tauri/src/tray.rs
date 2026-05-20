@@ -36,7 +36,8 @@ fn windows_uses_dark_theme() -> bool {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_VALUE_TYPE,
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+        REG_VALUE_TYPE,
     };
 
     fn to_wide(s: &str) -> Vec<u16> {
@@ -48,8 +49,13 @@ fn windows_uses_dark_theme() -> bool {
 
     unsafe {
         let mut hkey = HKEY::default();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), Some(0), KEY_READ, &mut hkey)
-            != ERROR_SUCCESS
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(subkey.as_ptr()),
+            Some(0),
+            KEY_READ,
+            &mut hkey,
+        ) != ERROR_SUCCESS
         {
             return false;
         }
@@ -137,17 +143,17 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .tooltip(TrayState::Idle.tooltip())
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .on_menu_event(move |app: &AppHandle, event: MenuEvent| match event.id.as_ref() {
-            "quit" => app.exit(0),
-            "open_settings" => {
-                use tauri::Manager;
-                if let Some(window) = app.get_webview_window("settings") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+        .on_menu_event(
+            move |app: &AppHandle, event: MenuEvent| match event.id.as_ref() {
+                "quit" => app.exit(0),
+                "open_settings" => {
+                    if let Err(e) = crate::ui::open_settings_window(app) {
+                        tracing::error!("open settings failed: {:#}", e);
+                    }
                 }
-            }
-            _ => {}
-        });
+                _ => {}
+            },
+        );
 
     // On macOS the OS handles tinting for template images: a B&W glyph
     // with alpha gets painted in the current menu-bar color (which

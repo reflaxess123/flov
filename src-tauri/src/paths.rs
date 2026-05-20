@@ -35,8 +35,7 @@ pub fn user_data_dir() -> Result<PathBuf> {
         return Ok(d.clone());
     }
     let dir = compute_data_dir()?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create data dir {:?}", dir))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create data dir {:?}", dir))?;
     let _ = DATA_DIR.set(dir.clone());
     Ok(dir)
 }

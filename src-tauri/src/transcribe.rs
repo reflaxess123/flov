@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -56,7 +57,7 @@ pub fn available_backends() -> Vec<String> {
     BACKEND_PRIORITY
         .iter()
         .filter(|b| dir.join(backend_bin_name(b)).exists())
-        .filter(|b| !(**b == "cuda") || cuda_runtime_present())
+        .filter(|b| **b != "cuda" || cuda_runtime_present())
         .map(|b| (*b).to_string())
         .collect()
 }
@@ -70,7 +71,9 @@ fn cuda_runtime_present() -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn cuda_runtime_present() -> bool { false }
+fn cuda_runtime_present() -> bool {
+    false
+}
 
 pub struct Transcriber {
     model_path: Arc<Mutex<PathBuf>>,
@@ -104,7 +107,7 @@ impl Transcriber {
     }
 
     pub fn transcribe(&self, samples: &[f32]) -> Result<String> {
-        let total_start = std::time::Instant::now();
+        let total_start = Instant::now();
         let choice = self.backend_choice.lock().unwrap().clone();
         let (backend, sidecar) = resolve_sidecar(&choice)?;
         let model_path = self.model_path.lock().unwrap().clone();
@@ -137,20 +140,12 @@ impl Transcriber {
             .spawn()
             .with_context(|| format!("failed to spawn sidecar: {:?}", sidecar))?;
 
-        // Write raw f32 LE PCM to stdin in one shot, then close to signal EOF.
-        {
-            let mut stdin = child.stdin.take().context("sidecar stdin missing")?;
-            let mut buf = Vec::with_capacity(samples.len() * 4);
-            for s in samples {
-                buf.extend_from_slice(&s.to_le_bytes());
-            }
-            stdin
-                .write_all(&buf)
-                .context("failed to write samples to sidecar")?;
-            // Dropping stdin closes the pipe → sidecar's read_to_end returns.
-        }
+        let mut stdout = child.stdout.take().context("sidecar stdout missing")?;
+        let stdout_thread = std::thread::spawn(move || {
+            let mut buf = String::new();
+            stdout.read_to_string(&mut buf).map(|_| buf)
+        });
 
-        // Drain stderr in a thread so the sidecar can't block on a full pipe.
         let mut stderr = child.stderr.take().context("sidecar stderr missing")?;
         let stderr_thread = std::thread::spawn(move || {
             let mut buf = String::new();
@@ -158,15 +153,73 @@ impl Transcriber {
             buf
         });
 
-        let mut stdout_buf = String::new();
-        if let Some(mut out) = child.stdout.take() {
-            out.read_to_string(&mut stdout_buf)
-                .context("failed to read sidecar stdout")?;
+        let timeout = transcription_timeout(samples.len());
+        let mut stdin = child.stdin.take().context("sidecar stdin missing")?;
+        let write_start = Instant::now();
+        let (status, write_result, timed_out) = std::thread::scope(|scope| -> Result<_> {
+            let stdin_thread = scope.spawn(move || {
+                let result = write_samples_to_stdin(&mut stdin, samples);
+                // Dropping stdin closes the pipe → sidecar's read_to_end returns.
+                drop(stdin);
+                result
+            });
+
+            let mut timed_out = false;
+            let status = loop {
+                if let Some(status) = child.try_wait().context("sidecar wait failed")? {
+                    break status;
+                }
+                if total_start.elapsed() > timeout {
+                    timed_out = true;
+                    tracing::error!(
+                        "sidecar timed out after {:?}; killing process",
+                        total_start.elapsed()
+                    );
+                    let _ = child.kill();
+                    break child.wait().context("sidecar wait after kill failed")?;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+
+            let write_result = stdin_thread
+                .join()
+                .map_err(|_| anyhow::anyhow!("sidecar stdin writer panicked"))?;
+            Ok((status, write_result, timed_out))
+        })?;
+        tracing::debug!(
+            "sidecar stdin writer finished after {:?} for {} samples",
+            write_start.elapsed(),
+            samples.len()
+        );
+
+        if timed_out {
+            let stdout_text = stdout_thread
+                .join()
+                .ok()
+                .and_then(|result| result.ok())
+                .unwrap_or_default();
+            let stderr_text = stderr_thread.join().unwrap_or_default();
+            anyhow::bail!(
+                "sidecar timed out after {:?}; stdout: {}; stderr: {}",
+                timeout,
+                stdout_text.trim(),
+                stderr_text.trim()
+            );
         }
 
-        let status = child.wait().context("sidecar wait failed")?;
+        let stdout_buf = stdout_thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("sidecar stdout reader panicked"))?
+            .context("failed to read sidecar stdout")?;
         let stderr_text = stderr_thread.join().unwrap_or_default();
 
+        if let Err(e) = write_result {
+            anyhow::bail!(
+                "failed to write samples to sidecar: {:#}; stderr: {}",
+                e,
+                stderr_text.trim()
+            );
+        }
         if !status.success() {
             anyhow::bail!(
                 "sidecar exited with {:?}; stderr: {}",
@@ -180,6 +233,28 @@ impl Transcriber {
         tracing::info!("transcription took {:?}", total_start.elapsed());
         Ok(stdout_buf.trim().to_string())
     }
+}
+
+fn write_samples_to_stdin<W: Write>(stdin: &mut W, samples: &[f32]) -> Result<()> {
+    const CHUNK_SAMPLES: usize = 4096;
+
+    let mut buf = Vec::with_capacity(CHUNK_SAMPLES * 4);
+    for chunk in samples.chunks(CHUNK_SAMPLES) {
+        buf.clear();
+        for sample in chunk {
+            buf.extend_from_slice(&sample.to_le_bytes());
+        }
+        stdin
+            .write_all(&buf)
+            .context("failed to write samples to sidecar")?;
+    }
+    Ok(())
+}
+
+fn transcription_timeout(sample_count: usize) -> Duration {
+    let audio_secs = sample_count as f64 / crate::audio::TRANSCRIBE_SAMPLE_RATE as f64;
+    let scaled = Duration::from_secs_f64((audio_secs * 12.0).max(30.0));
+    scaled.min(Duration::from_secs(10 * 60))
 }
 
 /// Picks the sidecar to spawn given a user choice.
@@ -214,4 +289,42 @@ fn resolve_sidecar(choice: &str) -> Result<(String, PathBuf)> {
         tried.push(candidate);
     }
     anyhow::bail!("no whisper sidecar found in {:?}; tried {:?}", dir, tried);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_samples_to_stdin_serializes_little_endian_f32() {
+        let mut out = Vec::new();
+
+        write_samples_to_stdin(&mut out, &[1.0, -2.5]).unwrap();
+
+        let expected = [1.0f32.to_le_bytes(), (-2.5f32).to_le_bytes()].concat();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn transcription_timeout_has_minimum_for_short_audio() {
+        assert_eq!(transcription_timeout(0), Duration::from_secs(30));
+        assert_eq!(
+            transcription_timeout(crate::audio::TRANSCRIBE_SAMPLE_RATE as usize),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn transcription_timeout_scales_with_audio_length() {
+        let samples = crate::audio::TRANSCRIBE_SAMPLE_RATE as usize * 5;
+
+        assert_eq!(transcription_timeout(samples), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn transcription_timeout_is_capped() {
+        let samples = crate::audio::TRANSCRIBE_SAMPLE_RATE as usize * 120;
+
+        assert_eq!(transcription_timeout(samples), Duration::from_secs(10 * 60));
+    }
 }

@@ -1,17 +1,23 @@
 use anyhow::{Context, Result};
+use std::time::Duration;
 
 pub struct PostProcessor {
     api_key: String,
     model: String,
     system_prompt: String,
+    agent: ureq::Agent,
 }
 
 impl PostProcessor {
     pub fn new(api_key: String, model: String, system_prompt: String) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build();
         Self {
             api_key,
             model,
             system_prompt,
+            agent: config.into(),
         }
     }
 
@@ -41,7 +47,9 @@ impl PostProcessor {
         );
 
         let started = std::time::Instant::now();
-        let mut resp = match ureq::post("https://openrouter.ai/api/v1/chat/completions")
+        let mut resp = match self
+            .agent
+            .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", &format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .send_json(&body)
@@ -65,7 +73,11 @@ impl PostProcessor {
                 started.elapsed(),
                 body_text
             );
-            anyhow::bail!("OpenRouter returned HTTP {}: {}", status.as_u16(), body_text);
+            anyhow::bail!(
+                "OpenRouter returned HTTP {}: {}",
+                status.as_u16(),
+                body_text
+            );
         }
 
         let response: serde_json::Value = resp

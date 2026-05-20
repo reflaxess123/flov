@@ -7,9 +7,9 @@
 
   const win = getCurrentWindow();
 
-  // X just hides the window — actually quitting flov is done from the tray.
+  // X closes only this settings webview — flov itself keeps running from tray.
   function close() {
-    win.hide();
+    win.close();
   }
 </script>
 

@@ -30,6 +30,12 @@ impl HotkeyState {
     }
 }
 
+impl Default for HotkeyState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Parsed hotkey definition. The combo's last token is the trigger key
 /// (whose KEYDOWN starts recording / KEYUP stops it). All earlier tokens
 /// must be held at trigger time.
@@ -60,9 +66,10 @@ impl HotkeyDef {
 
         let mut modifier_vks = Vec::new();
         for m in modifier_tokens {
-            modifier_vks.extend(modifier_vk_codes(m).ok_or_else(|| {
-                format!("unknown modifier '{}' in '{}'", m, combo)
-            })?);
+            modifier_vks.extend(
+                modifier_vk_codes(m)
+                    .ok_or_else(|| format!("unknown modifier '{}' in '{}'", m, combo))?,
+            );
         }
 
         let trigger_vks = trigger_vk_codes(trigger_token)
@@ -84,17 +91,17 @@ fn modifier_vk_codes(token: &str) -> Option<Vec<u16>> {
     // "RCtrl" can mean "right ctrl only".
     match token.to_ascii_lowercase().as_str() {
         "ctrl" | "control" => Some(vec![0x11]),
-        "lctrl"            => Some(vec![0xA2]),
-        "rctrl"            => Some(vec![0xA3]),
-        "alt" | "menu"     => Some(vec![0x12]),
-        "lalt"             => Some(vec![0xA4]),
-        "ralt"             => Some(vec![0xA5]),
-        "shift"            => Some(vec![0x10]),
-        "lshift"           => Some(vec![0xA0]),
-        "rshift"           => Some(vec![0xA1]),
+        "lctrl" => Some(vec![0xA2]),
+        "rctrl" => Some(vec![0xA3]),
+        "alt" | "menu" => Some(vec![0x12]),
+        "lalt" => Some(vec![0xA4]),
+        "ralt" => Some(vec![0xA5]),
+        "shift" => Some(vec![0x10]),
+        "lshift" => Some(vec![0xA0]),
+        "rshift" => Some(vec![0xA1]),
         "win" | "meta" | "super" | "cmd" => Some(vec![0x5B, 0x5C]),
-        "lwin"             => Some(vec![0x5B]),
-        "rwin"             => Some(vec![0x5C]),
+        "lwin" => Some(vec![0x5B]),
+        "rwin" => Some(vec![0x5C]),
         _ => None,
     }
 }
@@ -108,14 +115,14 @@ fn trigger_vk_codes(token: &str) -> Option<Vec<u16>> {
     if let Some(mods) = modifier_vk_codes(token) {
         return Some(match token.to_ascii_lowercase().as_str() {
             "ctrl" | "control" => vec![0xA2, 0xA3],
-            "lctrl"            => vec![0xA2],
-            "rctrl"            => vec![0xA3],
-            "alt" | "menu"     => vec![0xA4, 0xA5],
-            "lalt"             => vec![0xA4],
-            "ralt"             => vec![0xA5],
-            "shift"            => vec![0xA0, 0xA1],
-            "lshift"           => vec![0xA0],
-            "rshift"           => vec![0xA1],
+            "lctrl" => vec![0xA2],
+            "rctrl" => vec![0xA3],
+            "alt" | "menu" => vec![0xA4, 0xA5],
+            "lalt" => vec![0xA4],
+            "ralt" => vec![0xA5],
+            "shift" => vec![0xA0, 0xA1],
+            "lshift" => vec![0xA0],
+            "rshift" => vec![0xA1],
             _ => mods, // win/lwin/rwin already correct
         });
     }
@@ -256,11 +263,9 @@ mod windows_impl {
                         return LRESULT(1);
                     }
                 }
-                WM_KEYUP | WM_SYSKEYUP => {
-                    if TRIGGER_HELD.load(Ordering::SeqCst) {
-                        TRIGGER_HELD.store(false, Ordering::SeqCst);
-                        state.active_mode.store(MODE_IDLE, Ordering::SeqCst);
-                    }
+                WM_KEYUP | WM_SYSKEYUP if TRIGGER_HELD.load(Ordering::SeqCst) => {
+                    TRIGGER_HELD.store(false, Ordering::SeqCst);
+                    state.active_mode.store(MODE_IDLE, Ordering::SeqCst);
                 }
                 _ => {}
             }
@@ -294,7 +299,8 @@ mod windows_impl {
         let handle = std::thread::Builder::new()
             .name("flov-keyhook".into())
             .spawn(move || unsafe {
-                let mut hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0) {
+                let mut hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0)
+                {
                     Ok(h) => h,
                     Err(e) => {
                         let _ = tx.send(Err(e.to_string()));
@@ -318,20 +324,29 @@ mod windows_impl {
                 const REINSTALL_MS: u32 = 30_000;
                 let timer_id = SetTimer(None, 0, REINSTALL_MS, None);
                 if timer_id == 0 {
-                    tracing::warn!("SetTimer for hook watchdog failed — running without periodic reinstall");
+                    tracing::warn!(
+                        "SetTimer for hook watchdog failed — running without periodic reinstall"
+                    );
                 }
 
                 let mut msg = MSG::default();
                 loop {
                     let r = GetMessageW(&mut msg, None, 0, 0);
-                    if r.0 <= 0 { break; }
+                    if r.0 <= 0 {
+                        break;
+                    }
 
                     if msg.message == WM_TIMER {
                         let _ = UnhookWindowsHookEx(hook);
                         match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0) {
-                            Ok(h) => { hook = h; }
+                            Ok(h) => {
+                                hook = h;
+                            }
                             Err(e) => {
-                                tracing::error!("hook reinstall failed: {} — retrying next tick", e);
+                                tracing::error!(
+                                    "hook reinstall failed: {} — retrying next tick",
+                                    e
+                                );
                                 // Fall back to a sentinel handle; next
                                 // WM_TIMER will retry.
                                 hook = windows::Win32::UI::WindowsAndMessaging::HHOOK::default();
@@ -391,8 +406,8 @@ mod macos_impl {
     use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
     use core_foundation::string::CFString;
     use core_graphics::event::{
-        CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
-        CGEventTapPlacement, CGEventType, EventField,
+        CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+        CGEventType, EventField,
     };
 
     // Apple's AX API for checking + prompting Accessibility permission.
@@ -417,10 +432,7 @@ mod macos_impl {
     // cleanest way to re-arm after `TapDisabledBy{Timeout,UserInput}`.
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
-        fn CGEventTapEnable(
-            tap: core_foundation::mach_port::CFMachPortRef,
-            enable: bool,
-        );
+        fn CGEventTapEnable(tap: core_foundation::mach_port::CFMachPortRef, enable: bool);
     }
 
     /// Returns true if the process is already trusted for Accessibility.
@@ -539,14 +551,42 @@ mod macos_impl {
     /// A key position, regardless of dvorak / etc).
     fn ansi_keycode(c: char) -> Option<u16> {
         Some(match c.to_ascii_lowercase() {
-            'a' => 0x00, 'b' => 0x0B, 'c' => 0x08, 'd' => 0x02, 'e' => 0x0E,
-            'f' => 0x03, 'g' => 0x05, 'h' => 0x04, 'i' => 0x22, 'j' => 0x26,
-            'k' => 0x28, 'l' => 0x25, 'm' => 0x2E, 'n' => 0x2D, 'o' => 0x1F,
-            'p' => 0x23, 'q' => 0x0C, 'r' => 0x0F, 's' => 0x01, 't' => 0x11,
-            'u' => 0x20, 'v' => 0x09, 'w' => 0x0D, 'x' => 0x07, 'y' => 0x10,
+            'a' => 0x00,
+            'b' => 0x0B,
+            'c' => 0x08,
+            'd' => 0x02,
+            'e' => 0x0E,
+            'f' => 0x03,
+            'g' => 0x05,
+            'h' => 0x04,
+            'i' => 0x22,
+            'j' => 0x26,
+            'k' => 0x28,
+            'l' => 0x25,
+            'm' => 0x2E,
+            'n' => 0x2D,
+            'o' => 0x1F,
+            'p' => 0x23,
+            'q' => 0x0C,
+            'r' => 0x0F,
+            's' => 0x01,
+            't' => 0x11,
+            'u' => 0x20,
+            'v' => 0x09,
+            'w' => 0x0D,
+            'x' => 0x07,
+            'y' => 0x10,
             'z' => 0x06,
-            '0' => 0x1D, '1' => 0x12, '2' => 0x13, '3' => 0x14, '4' => 0x15,
-            '5' => 0x17, '6' => 0x16, '7' => 0x1A, '8' => 0x1C, '9' => 0x19,
+            '0' => 0x1D,
+            '1' => 0x12,
+            '2' => 0x13,
+            '3' => 0x14,
+            '4' => 0x15,
+            '5' => 0x17,
+            '6' => 0x16,
+            '7' => 0x1A,
+            '8' => 0x1C,
+            '9' => 0x19,
             _ => return None,
         })
     }
@@ -732,8 +772,8 @@ mod macos_impl {
         // an app could react to).
         match etype {
             CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-                let port = TAP_PORT.load(Ordering::SeqCst)
-                    as core_foundation::mach_port::CFMachPortRef;
+                let port =
+                    TAP_PORT.load(Ordering::SeqCst) as core_foundation::mach_port::CFMachPortRef;
                 if !port.is_null() {
                     unsafe { CGEventTapEnable(port, true) };
                     tracing::warn!("CGEventTap re-enabled after {:?}", etype);
@@ -767,9 +807,7 @@ mod macos_impl {
         match (etype, combo.trigger_is_modifier) {
             // Non-modifier trigger (e.g. Cmd+Alt+Space).
             (CGEventType::KeyDown, false) => {
-                if combo.trigger_keycodes.contains(&vk)
-                    && flags.contains(combo.required_flags)
-                {
+                if combo.trigger_keycodes.contains(&vk) && flags.contains(combo.required_flags) {
                     // `TRIGGER_HELD` collapses macOS's KEYDOWN auto-repeat
                     // into a single arm event — same as the Windows hook.
                     // We deliberately do NOT consult `state.is_recording`
@@ -783,9 +821,7 @@ mod macos_impl {
                 }
             }
             (CGEventType::KeyUp, false) => {
-                if combo.trigger_keycodes.contains(&vk)
-                    && TRIGGER_HELD.load(Ordering::SeqCst)
-                {
+                if combo.trigger_keycodes.contains(&vk) && TRIGGER_HELD.load(Ordering::SeqCst) {
                     TRIGGER_HELD.store(false, Ordering::SeqCst);
                     state.active_mode.store(MODE_IDLE, Ordering::SeqCst);
                 }
@@ -836,8 +872,15 @@ mod linux_impl {
                     }
                 }
                 if let Ok(dev) = Device::open(&path) {
-                    if dev.supported_keys().is_some_and(|keys| keys.contains(Key::KEY_A)) {
-                        tracing::info!("Found keyboard: {} ({})", dev.name().unwrap_or("?"), path.display());
+                    if dev
+                        .supported_keys()
+                        .is_some_and(|keys| keys.contains(Key::KEY_A))
+                    {
+                        tracing::info!(
+                            "Found keyboard: {} ({})",
+                            dev.name().unwrap_or("?"),
+                            path.display()
+                        );
                         keyboards.push(dev);
                     }
                 }
@@ -869,41 +912,41 @@ mod linux_impl {
                 let mode = active_mode.clone();
                 let recording = is_recording.clone();
 
-                let h = std::thread::spawn(move || {
-                    loop {
-                        match dev.fetch_events() {
-                            Ok(events) => {
-                                for ev in events {
-                                    if let InputEventKind::Key(key) = ev.kind() {
-                                        let value = ev.value();
-                                        match key {
-                                            Key::KEY_LEFTCTRL | Key::KEY_RIGHTCTRL => {
-                                                ctrl.store(value != 0, Ordering::SeqCst);
-                                            }
-                                            Key::KEY_LEFTMETA | Key::KEY_RIGHTMETA => {
-                                                if value == 1 {
-                                                    if ctrl.load(Ordering::SeqCst)
-                                                        && !recording.load(Ordering::SeqCst)
-                                                    {
-                                                        tracing::info!("Hotkey: Ctrl+Super (transcribe)");
-                                                        mode.store(MODE_TRANSCRIBE, Ordering::SeqCst);
-                                                        recording.store(true, Ordering::SeqCst);
-                                                    }
-                                                } else if value == 0 {
-                                                    if mode.load(Ordering::SeqCst) == MODE_TRANSCRIBE {
-                                                        mode.store(MODE_IDLE, Ordering::SeqCst);
-                                                    }
+                let h = std::thread::spawn(move || loop {
+                    match dev.fetch_events() {
+                        Ok(events) => {
+                            for ev in events {
+                                if let InputEventKind::Key(key) = ev.kind() {
+                                    let value = ev.value();
+                                    match key {
+                                        Key::KEY_LEFTCTRL | Key::KEY_RIGHTCTRL => {
+                                            ctrl.store(value != 0, Ordering::SeqCst);
+                                        }
+                                        Key::KEY_LEFTMETA | Key::KEY_RIGHTMETA => {
+                                            if value == 1 {
+                                                if ctrl.load(Ordering::SeqCst)
+                                                    && !recording.load(Ordering::SeqCst)
+                                                {
+                                                    tracing::info!(
+                                                        "Hotkey: Ctrl+Super (transcribe)"
+                                                    );
+                                                    mode.store(MODE_TRANSCRIBE, Ordering::SeqCst);
+                                                    recording.store(true, Ordering::SeqCst);
+                                                }
+                                            } else if value == 0 {
+                                                if mode.load(Ordering::SeqCst) == MODE_TRANSCRIBE {
+                                                    mode.store(MODE_IDLE, Ordering::SeqCst);
                                                 }
                                             }
-                                            _ => {}
                                         }
+                                        _ => {}
                                     }
                                 }
                             }
-                            Err(e) => {
-                                tracing::error!("evdev read error: {}", e);
-                                break;
-                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("evdev read error: {}", e);
+                            break;
                         }
                     }
                 });
@@ -929,3 +972,48 @@ pub use macos_impl::{install_hook, set_hotkey_def};
 
 #[cfg(target_os = "linux")]
 pub use linux_impl::{install_hook, set_hotkey_def};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_default_ctrl_win_combo() {
+        let def = HotkeyDef::parse("Ctrl+Win").unwrap();
+
+        assert_eq!(def.modifier_vks, vec![0x11]);
+        assert_eq!(def.trigger_vks, vec![0x5B, 0x5C]);
+        assert_eq!(def.combo, "Ctrl+Win");
+    }
+
+    #[test]
+    fn parses_regular_key_trigger() {
+        let def = HotkeyDef::parse(" ctrl + alt + space ").unwrap();
+
+        assert_eq!(def.modifier_vks, vec![0x11, 0x12]);
+        assert_eq!(def.trigger_vks, vec![0x20]);
+    }
+
+    #[test]
+    fn generic_modifier_trigger_expands_to_left_and_right_keys() {
+        let def = HotkeyDef::parse("Ctrl").unwrap();
+
+        assert!(def.modifier_vks.is_empty());
+        assert_eq!(def.trigger_vks, vec![0xA2, 0xA3]);
+    }
+
+    #[test]
+    fn side_specific_modifier_trigger_matches_single_key() {
+        let def = HotkeyDef::parse("RCtrl").unwrap();
+
+        assert!(def.modifier_vks.is_empty());
+        assert_eq!(def.trigger_vks, vec![0xA3]);
+    }
+
+    #[test]
+    fn rejects_unknown_tokens() {
+        assert!(HotkeyDef::parse("Ctrl+Nope").is_err());
+        assert!(HotkeyDef::parse("Nope+Space").is_err());
+        assert!(HotkeyDef::parse("   ").is_err());
+    }
+}

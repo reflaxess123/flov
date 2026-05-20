@@ -1,18 +1,110 @@
-//! Tauri UI glue: window positioning, click-through, polished-pill handshake.
+//! Tauri UI glue: window positioning, click-through, and overlay lifecycle.
 
 #![allow(dead_code)]
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Buffered final text waiting for the polished-pill animation to finish
-/// (set by recording loop, drained by `polished_shown`).
-pub static PENDING_TEXT: Mutex<Option<String>> = Mutex::new(None);
+use tauri::Manager;
+
+static FRONTEND_READY_EPOCH: AtomicU64 = AtomicU64::new(0);
+static FRONTEND_RELOAD_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+static RECORDING_CYCLE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static LAST_OVERLAY_ACTIVITY_MS: AtomicU64 = AtomicU64::new(0);
+static PILL_STATE: AtomicU8 = AtomicU8::new(PillState::Idle as u8);
+static PILL_ERROR_TEXT: OnceLock<Mutex<String>> = OnceLock::new();
+
+#[derive(serde::Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PillState {
+    Idle = 0,
+    Recording = 1,
+    Transcribing = 2,
+    Error = 3,
+}
+
+impl PillState {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Recording,
+            2 => Self::Transcribing,
+            3 => Self::Error,
+            _ => Self::Idle,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PillSnapshot {
+    state: PillState,
+    error_text: String,
+}
+
+fn error_text() -> &'static Mutex<String> {
+    PILL_ERROR_TEXT.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn touch_overlay_activity() {
+    LAST_OVERLAY_ACTIVITY_MS.store(now_ms(), Ordering::SeqCst);
+}
+
+pub fn open_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window("settings") {
+        window.show()?;
+        window.set_focus()?;
+        tracing::info!("settings window shown");
+        return Ok(());
+    }
+
+    tracing::info!("creating settings window on demand");
+    let builder = tauri::WebviewWindowBuilder::new(
+        app,
+        "settings",
+        tauri::WebviewUrl::App("/settings".into()),
+    )
+    .title("flov - Settings")
+    .inner_size(1240.0, 880.0)
+    .min_inner_size(1080.0, 720.0)
+    .decorations(false)
+    .shadow(false)
+    .resizable(true)
+    .visible(true)
+    .skip_taskbar(false)
+    .focused(true)
+    .center();
+
+    // On Windows the old hidden+transparent settings webview sometimes failed
+    // at startup with WebView2 0x8007139F and left tray Open Settings as a
+    // silent no-op. The settings surface is full-bleed opaque anyway, so keep
+    // transparent windows reserved for the tiny recording overlay.
+    #[cfg(not(target_os = "windows"))]
+    let builder = builder.transparent(true);
+
+    let builder = builder.icon(crate::tray::load_themed_icon_for_window())?;
+    let window = builder.build()?;
+
+    #[cfg(target_os = "windows")]
+    disable_native_window_rounding(&window);
+    window.set_focus()?;
+    tracing::info!("settings window created and focused");
+    Ok(())
+}
 
 #[cfg(target_os = "windows")]
 pub fn position_at_cursor_monitor(window: &tauri::WebviewWindow) {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, HMONITOR, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
@@ -93,6 +185,29 @@ pub fn force_click_through(window: &tauri::WebviewWindow) {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let new = ex | (WS_EX_LAYERED.0 as isize) | (WS_EX_TRANSPARENT.0 as isize);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new);
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn set_window_alpha(window: &tauri::WebviewWindow, alpha: u8) {
+    use windows::Win32::Foundation::{COLORREF, HWND};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
+        WS_EX_LAYERED,
+    };
+
+    let raw = match window.hwnd() {
+        Ok(h) => h.0,
+        Err(_) => return,
+    };
+    let hwnd = HWND(raw);
+
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | (WS_EX_LAYERED.0 as isize));
+        if let Err(e) = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA) {
+            tracing::warn!("SetLayeredWindowAttributes(alpha={}) failed: {}", alpha, e);
+        }
     }
 }
 
@@ -203,19 +318,157 @@ pub fn position_at_cursor_monitor(window: &tauri::WebviewWindow) {
     let _ = window.set_position(tauri::LogicalPosition::new(x, y));
 }
 
-/// Frontend tells us its polished-pill animation is done — paste the buffered
-/// text. Window is hidden separately by `hide_window` after morph-out plays.
 #[tauri::command]
-pub fn polished_shown() {
-    let text = PENDING_TEXT.lock().unwrap().take();
-    if let Some(t) = text {
-        crate::input::type_text(&t);
+pub fn repaint_window(window: tauri::WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        set_window_alpha(&window, 255);
+        force_repaint(&window);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = window;
+}
+
+#[tauri::command]
+pub fn pill_frontend_ready(window: tauri::WebviewWindow) -> PillSnapshot {
+    let epoch = FRONTEND_READY_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    FRONTEND_RELOAD_IN_PROGRESS.store(false, Ordering::SeqCst);
+    if !recording_cycle_active() {
+        set_overlay_active(false);
+    }
+    let snapshot = pill_snapshot();
+    if !matches!(snapshot.state, PillState::Idle) {
+        if let Err(e) = window.show() {
+            tracing::warn!("pill frontend ready: window.show() failed: {}", e);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        force_click_through(&window);
+    }
+    tracing::info!("pill frontend ready, epoch={}", epoch);
+    snapshot
+}
+
+pub fn frontend_ready_epoch() -> u64 {
+    FRONTEND_READY_EPOCH.load(Ordering::SeqCst)
+}
+
+pub fn mark_frontend_reload_started() -> u64 {
+    FRONTEND_RELOAD_IN_PROGRESS.store(true, Ordering::SeqCst);
+    frontend_ready_epoch()
+}
+
+pub fn mark_frontend_reload_finished() {
+    FRONTEND_RELOAD_IN_PROGRESS.store(false, Ordering::SeqCst);
+}
+
+pub fn frontend_reload_in_progress() -> bool {
+    FRONTEND_RELOAD_IN_PROGRESS.load(Ordering::SeqCst)
+}
+
+pub fn set_recording_cycle_active(active: bool) {
+    RECORDING_CYCLE_ACTIVE.store(active, Ordering::SeqCst);
+    touch_overlay_activity();
+    if active {
+        OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
     }
 }
 
-/// Frontend calls this after the pill's exit transition finishes — only then
-/// do we actually hide the OS window, so the morph-out is visible.
+pub fn recording_cycle_active() -> bool {
+    RECORDING_CYCLE_ACTIVE.load(Ordering::SeqCst)
+}
+
+pub fn set_overlay_active(active: bool) {
+    OVERLAY_ACTIVE.store(active, Ordering::SeqCst);
+    touch_overlay_activity();
+}
+
+pub fn overlay_active() -> bool {
+    OVERLAY_ACTIVE.load(Ordering::SeqCst) || recording_cycle_active()
+}
+
+pub fn overlay_quiet_for(duration: Duration) -> bool {
+    let last = LAST_OVERLAY_ACTIVITY_MS.load(Ordering::SeqCst);
+    last != 0 && now_ms().saturating_sub(last) >= duration.as_millis() as u64
+}
+
+pub fn wait_for_frontend_ready_after(previous_epoch: u64, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if frontend_ready_epoch() > previous_epoch {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+pub fn wait_for_frontend_reload_if_needed(timeout: Duration) -> bool {
+    if !frontend_reload_in_progress() {
+        return true;
+    }
+
+    let previous_epoch = frontend_ready_epoch();
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if !frontend_reload_in_progress() || frontend_ready_epoch() > previous_epoch {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    !frontend_reload_in_progress()
+}
+
+pub fn set_pill_state(state: PillState) {
+    PILL_STATE.store(state as u8, Ordering::SeqCst);
+    if !matches!(state, PillState::Error) {
+        error_text().lock().unwrap().clear();
+    }
+    if !matches!(state, PillState::Idle) {
+        set_overlay_active(true);
+    } else {
+        set_overlay_active(false);
+    }
+}
+
+pub fn set_pill_error(message: &str) {
+    PILL_STATE.store(PillState::Error as u8, Ordering::SeqCst);
+    *error_text().lock().unwrap() = message.to_string();
+    set_overlay_active(true);
+}
+
+pub fn pill_snapshot() -> PillSnapshot {
+    PillSnapshot {
+        state: PillState::from_u8(PILL_STATE.load(Ordering::SeqCst)),
+        error_text: error_text().lock().unwrap().clone(),
+    }
+}
+
+/// Frontend calls this after the pill's exit transition finishes.
+///
+/// Do not call `window.hide()` here. On Windows that turns into an HWND
+/// `SW_HIDE`, and the embedded WebView2 can be treated as hidden/background:
+/// timers are throttled, renderer state can suspend, and the next `show()`
+/// may come back with a blank stale surface. The visual hide is the Svelte
+/// `{#if}` unmount; the OS window remains transparent and click-through.
 #[tauri::command]
 pub fn hide_window(window: tauri::WebviewWindow) {
-    let _ = window.hide();
+    if recording_cycle_active() {
+        tracing::info!("logical pill hide received while a recording cycle is active");
+    } else {
+        set_pill_state(PillState::Idle);
+    }
+    set_overlay_active(false);
+    #[cfg(target_os = "windows")]
+    {
+        force_click_through(&window);
+        if !recording_cycle_active() {
+            set_window_alpha(&window, 0);
+        }
+        force_repaint(&window);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = window;
 }

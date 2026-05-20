@@ -1,6 +1,6 @@
 [package]
 name = "flov_app"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Voice-to-text desktop app (Windows / macOS)"
 
@@ -12,12 +12,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# Tauri. `macos-private-api` is paired with `app.macOSPrivateApi: true`
-# in tauri.macos.conf.json — required for the pill's transparent +
-# shadow-disabled window on macOS. On Windows / Linux the feature
-# is a no-op so it's enabled unconditionally to keep the Cargo file
-# free of target-specific feature splits.
-tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+# Tauri base features shared by every platform.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 
 
@@ -77,6 +73,11 @@ windows = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# `macos-private-api` is paired with `app.macOSPrivateApi: true` in
+# tauri.macos.conf.json. Keep it target-scoped: Tauri validates enabled
+# features against the active platform config, so enabling this globally
+# breaks ordinary Windows `cargo check` before Rust code is compiled.
+tauri = { version = "2", features = ["macos-private-api"] }
 # CoreGraphics: CGEventTap (global hotkey hook) + CGEventPost (synthetic
 # Cmd+V for paste) + CGDisplay (cursor's screen for pill positioning).
 core-graphics = "0.24"

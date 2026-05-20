@@ -1,11 +1,10 @@
 <script lang="ts">
   import AudioWave from "./AudioWave.svelte";
 
-  type State = "idle" | "recording" | "transcribing" | "polished" | "error";
+  type State = "idle" | "recording" | "transcribing" | "error";
   type Props = {
     status: State;
     spectrum: number[];
-    polishedText?: string;
     errorText?: string;
   };
 

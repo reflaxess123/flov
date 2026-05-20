@@ -180,8 +180,8 @@ mod macos_impl {
     }
 
     fn set_clipboard_text(text: &str) -> anyhow::Result<()> {
-        let mut cb = arboard::Clipboard::new()
-            .map_err(|e| anyhow::anyhow!("Clipboard::new: {}", e))?;
+        let mut cb =
+            arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("Clipboard::new: {}", e))?;
         cb.set_text(text.to_string())
             .map_err(|e| anyhow::anyhow!("set_text: {}", e))
     }
@@ -211,10 +211,7 @@ mod linux_impl {
     use std::process::Command;
 
     pub fn get_clipboard() -> Option<String> {
-        let output = Command::new("wl-paste")
-            .arg("--no-newline")
-            .output()
-            .ok()?;
+        let output = Command::new("wl-paste").arg("--no-newline").output().ok()?;
         if output.status.success() {
             Some(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
@@ -224,9 +221,7 @@ mod linux_impl {
 
     pub fn type_text(text: &str) {
         // Use wl-copy to set clipboard, then wtype to paste
-        let copy_result = Command::new("wl-copy")
-            .arg(text)
-            .status();
+        let copy_result = Command::new("wl-copy").arg(text).status();
 
         match copy_result {
             Ok(status) if status.success() => {

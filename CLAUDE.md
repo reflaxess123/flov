@@ -27,12 +27,16 @@ flov/
 │   ├── tauri.windows.conf.json # Windows-only: NSIS bundle, externalBin cpu+vulkan
 │   ├── tauri.macos.conf.json   # macOS-only: .app/.dmg targets, macOSPrivateApi
 │   ├── Info.plist              # macOS Info.plist patch — NSMicrophoneUsageDescription + LSUIElement
+│   │                         # tauri.conf declares only the main pill window;
+│   │                         # settings window is created lazily from Rust
 │   ├── icons/          # tray.png (32x32, чёрный глиф; tray.rs.invert на dark theme)
 │   ├── capabilities/   # Tauri 2 permissions (settings.json — для settings window)
 │   └── src/
 │       ├── main.rs        # entry, вызывает flov_lib::run
 │       ├── lib.rs         # оркестрация: загрузка config, инициализация Recorder/Transcriber/HotkeyHook,
-│       │                  # spawn recording_loop, Tauri Builder
+│       │                  # Tauri Builder, manage state, spawn runtime workers
+│       ├── recording.rs   # runtime loop: hotkey → record → transcribe → postprocess → paste,
+│       │                  # watchdog, periodic pill webview reload, recording-cycle guard
 │       ├── audio.rs       # WASAPI/CoreAudio запись через cpal, ресемплинг 16kHz, FFT-спектр для оверлея
 │       ├── hotkey.rs      # глобальный keyboard hook (Win32 WH_KEYBOARD_LL / macOS CGEventTap / Linux evdev),
 │       │                  # парсер combo строк (Ctrl+Win, Cmd+Alt, RCtrl и т.д.), live re-bind
@@ -62,7 +66,7 @@ flov/
 │       ├── routes/
 │       │   ├── +page.svelte         # main pill window — слушает state-changed/audio-spectrum events
 │       │   └── settings/+page.svelte # Settings window — drag-strip + 2-col grid (left: Models+Backend+Stats,
-│       │                              # right: Postprocess+Hotkey)
+│       │                              # right: Postprocess+Hotkey+Mic)
 │       └── lib/
 │           ├── Pill.svelte         # capsule с morph transition (вжух scale + width expand),
 │           │                       # cross-fade currentColor recording↔transcribing,
@@ -103,18 +107,21 @@ sidecar на каждый transcribe call через shared `Arc<Mutex<String>>`
 
 Threads:
 1. **Main** — Win message loop, tray events, Tauri command handlers
-2. **Recording loop** (`lib.rs::recording_loop`) — ждёт хоткей, эмитит state events
+2. **Recording loop** (`recording.rs::recording_loop`) — ждёт хоткей, эмитит state events
    (`state-changed: idle|recording|transcribing`), пишет аудио в Recorder,
    вызывает Transcriber, опционально OpenRouter, шлёт текст через `input::type_text`
 3. **WebView pill** — Svelte рендерит Pill реагирующий на state events
-4. **WebView settings** — независимое окно, ходит в backend через Tauri commands
+4. **WebView settings** — создаётся лениво по tray Open Settings, ходит в backend через Tauri commands
 
 Tauri events (backend → pill webview):
 - `state-changed: "idle"|"recording"|"transcribing"` → Pill переключает контент
 - `audio-spectrum: number[]` (20 bands) → AudioWave амплитуда
 
 Tauri commands (frontend → backend):
-- `hide_window` — после morph-out transition прячем pill окно
+- `pill_frontend_ready` — вызывается после регистрации frontend listeners,
+  отмечает reload завершённым и возвращает snapshot текущего pill-state
+- `hide_window` — после morph-out transition помечает pill логически скрытым
+  (OS window не прячем; оно остаётся transparent + click-through)
 - `list_models` / `download_model` / `delete_model` / `set_active_model` — модели
 - `get_backend_state` / `set_backend_choice` — backend
 - `get_postprocess_config` / `set_postprocess_config` / `set_postprocess_enabled`
@@ -136,6 +143,15 @@ Tray меню (минимальное):
 
 (модели, backend, post-process, hotkey — всё в Settings window)
 
+Settings window intentionally is **not** declared in `tauri.conf.json`.
+On Windows, eagerly creating a hidden transparent settings WebView2 has
+repeatedly failed with `HRESULT(0x8007139F)` ("group or resource is not in
+the correct state"), leaving tray Open Settings as a silent no-op because
+`get_webview_window("settings")` returned `None`. `ui::open_settings_window`
+creates it on demand, logs any failure, and the frontend close button uses
+`window.close()` so the settings WebView is destroyed instead of sitting in
+hidden/suspended state for hours.
+
 ## Hotkey
 
 Парсер в `hotkey.rs` поддерживает:
@@ -148,7 +164,7 @@ Combo формат: `Ctrl+Win`, `RCtrl`, `Ctrl+Shift+K` и т.д. Последн
 (KEYDOWN запускает запись, KEYUP останавливает). Все предыдущие — modifier'ы,
 которые должны быть нажаты во время trigger'а.
 
-UI capture (`Postprocess.svelte`): keydown буферит pending combo, keyup коммитит.
+UI capture (`settings/HotkeyControl.svelte`): keydown буферит pending combo, keyup коммитит.
 Это позволяет одинаково записывать и одиночные клавиши (RCtrl), и комбо.
 
 ## Сборка
@@ -233,6 +249,10 @@ system_prompt = "..."
 ```
 
 Все поля редактируются surgical через toml_edit — комментарии сохраняются.
+`audio.sample_rate` фактически должен оставаться 16000: sidecar protocol
+принимает raw f32 LE PCM именно 16 kHz mono. `AudioRecorder` всё равно
+ресемплит native WASAPI rate к `audio::TRANSCRIBE_SAMPLE_RATE`, а если в
+конфиге окажется другое значение — логирует warning и игнорирует его.
 
 ## Gotchas / hard-won lessons
 
@@ -295,7 +315,7 @@ Fix — `additionalBrowserArgs` на pill window в `tauri.conf.json`:
   следующие нажатия dropиluсь. Теперь hook рулит только своим
   `TRIGGER_HELD`, recording_loop рулит своим `is_recording`.
 
-### Recording loop wedge → watchdog в lib.rs
+### Recording loop wedge → watchdog в recording.rs
 
 Если recording_loop крашнется mid-iteration (panicки), `is_recording`
 останется true навсегда. Воркер `flov-state-watchdog` проверяет каждые 2s:
@@ -303,15 +323,64 @@ Fix — `additionalBrowserArgs` на pill window в `tauri.conf.json`:
 
 ### WebView2 long-session rot — periodic reload
 
-Helt-and-suspenders сверх occlusion fix. WebView2 renderer leak'ит memory
+Belt-and-suspenders сверх occlusion fix. WebView2 renderer leak'ит memory
 + DOM state накапливается за multi-hour сессию. Воркер
 `flov-webview-reloader` делает `window.eval("location.reload()")` каждые
-30 минут, пропуская моменты когда `is_recording==true` или
-`is_visible()==true` (чтобы не дёрнуть pill из-под живой записи).
+30 минут, пропуская моменты когда `is_recording==true`, hotkey mode active,
+или `ui::overlay_active()==true` (чтобы не дёрнуть pill из-под живой
+записи/transcribe). `is_visible()` больше нельзя использовать как busy
+signal: main overlay window теперь намеренно остаётся OS-visible даже в idle,
+а визуально исчезает только через Svelte `{#if}`. Дополнительно reload
+требует `overlay_quiet_for(5s)`, чтобы stale logical hide не разрешил reload
+в узком окне morph-out.
+
+Важно: reload скрытого WebView не должен silently съесть первый следующий
+`state-changed`. Main page вызывает `pill_frontend_ready` только после того,
+как все Tauri event listeners зарегистрированы. Backend держит
+`frontend_reload_in_progress`, ждёт ready после `location.reload()`, а при
+следующем `window.show()` коротко ждёт ready перед emit `"recording"`, если
+reload всё ещё pending. Если событие всё-таки попало в узкое окно между
+reload и listener registration, `pill_frontend_ready` возвращает snapshot
+последнего backend state (`idle|recording|transcribing|error` + error text),
+и frontend восстанавливает pill без ожидания нового event.
+
+Чтобы periodic reload и первый `show()` не мигали белой/пустой WebView2
+surface на Windows, защита двухслойная:
+- до создания WebView2 выставляем `WEBVIEW2_DEFAULT_BACKGROUND_COLOR=00000000`.
+  Microsoft прямо документирует это как самый ранний способ убрать white
+  flicker до применения `DefaultBackgroundColor` API/CSS;
+- idle HWND держится с layered alpha=0 через `SetLayeredWindowAttributes`.
+  Backend делает `window.show()` при alpha=0, эмитит state, а frontend
+  после `tick()` + `requestAnimationFrame()` вызывает `repaint_window`;
+  только этот command возвращает alpha=255 и tickle'ит DWM.
 
 Ранее этот reload был привязан к recording cycle — если юзер сидел idle
 6 часов, ни одна запись = reload так и не сработал, webview успевал
 сгнить. Independent thread решил.
+
+### Stale hide timers can hide the next recording
+
+Main window больше не скрывается через `window.hide()`. После morph-out
+frontend вызывает `hide_window` через ~520ms, но backend только помечает
+overlay логически inactive и делает repaint/click-through refresh. Если
+пользователь снова нажимает хоткей до конца transition, старый таймер уже не
+может OS-hide'нуть новую запись; дополнительно `ui/src/routes/+page.svelte`
+сбрасывает все таймеры (`hide/error`) на каждый новый visible state
+и защищает delayed callbacks sequence counter'ом. Backend держит
+`RECORDING_CYCLE_ACTIVE`, поэтому даже уже улетевший stale `hide_window`
+не разрешит periodic reload во время новой recording/transcribe cycle.
+
+Причина именно в Windows/WebView2: hidden/minimized WebView попадает в
+background/hidden path с timer throttling/suspend; Wry прямо документирует,
+что view может быть unloaded/suspended после ~5 минут hidden/minimized, а
+Windows-ветка не поддерживает `background_throttling=disabled`. Поэтому
+самый надёжный путь — не переводить pill WebView в hidden state вообще:
+держим прозрачное click-through окно живым, idle DOM пустой.
+
+Windows repaint тоже делается в два шага: Rust всё ещё tickle'ит DWM сразу
+после `window.show()`, но frontend дополнительно вызывает `repaint_window`
+после `tick()` + `requestAnimationFrame()`, когда SVG pill уже реально
+появился в DOM. Иначе repaint мог произойти по пустому idle DOM.
 
 ### VC++ Redist обязателен для ВСЕХ sidecars (windows)
 
@@ -346,6 +415,26 @@ Helt-and-suspenders сверх occlusion fix. WebView2 renderer leak'ит memory
 если JS listener fall'ит behind, очередь IPC растёт и в итоге выглядит
 как зависание. Снизили до 60 мс (16 Hz) — wave выглядит так же гладко,
 а IPC traffic вдвое меньше.
+
+### Recorder hot path
+
+Audio callback не должен делать дорогие операции. Старый FFT буфер делал
+`Vec::remove(0)` после заполнения окна и держал отдельные locks для samples
+и spectrum. Сейчас `CaptureState` держит samples + fixed-size ring buffer
+под одним коротким mutex lock; FFT scratch/Hann buffers выделяются один раз
+и переиспользуются в polling loop.
+
+### Sidecar / OpenRouter hangs
+
+`transcribe.rs` читает stdout/stderr sidecar'а в отдельных threads, пишет
+PCM в stdin чанками (без полного `samples.len()*4` byte clone) и ждёт child
+через `try_wait()` с timeout: max(30s, audio_seconds*12), capped at 10 min.
+Если sidecar завис — процесс убивается, ошибка показывается пользователю,
+recording cycle освобождается.
+
+`postprocess.rs` использует reusable `ureq::Agent` с global timeout 120s.
+Без timeout OpenRouter/network hang мог держать pill в `transcribing`
+неограниченно долго.
 
 ### macOS unsigned-app + TCC: первый запуск = боль (mac)
 

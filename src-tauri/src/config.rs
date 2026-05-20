@@ -24,7 +24,9 @@ pub struct HotkeyConfig {
 }
 impl Default for HotkeyConfig {
     fn default() -> Self {
-        Self { combo: default_hotkey_combo() }
+        Self {
+            combo: default_hotkey_combo(),
+        }
     }
 }
 fn default_hotkey_combo() -> String {
@@ -151,10 +153,8 @@ fn default_sample_rate() -> u32 {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let config_path = crate::paths::config_path()
-            .context("Failed to compute config path")?;
-        let data_dir = crate::paths::user_data_dir()
-            .context("Failed to compute data dir")?;
+        let config_path = crate::paths::config_path().context("Failed to compute config path")?;
+        let data_dir = crate::paths::user_data_dir().context("Failed to compute data dir")?;
 
         if !config_path.exists() {
             return Ok(Config {
@@ -169,8 +169,7 @@ impl Config {
         let config_str = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read config from {:?}", config_path))?;
 
-        let mut config: Config = toml::from_str(&config_str)
-            .context("Failed to parse config")?;
+        let mut config: Config = toml::from_str(&config_str).context("Failed to parse config")?;
 
         // Resolve relative model_path against the data dir (where the
         // Models window also drops downloads).
@@ -199,7 +198,7 @@ impl Config {
     pub fn write_model_path(model_path: &std::path::Path) -> Result<()> {
         write_field(
             &["whisper", "model_path"],
-            &model_path.to_string_lossy().into_owned(),
+            model_path.to_string_lossy().as_ref(),
         )
     }
 
@@ -230,13 +229,10 @@ fn write_field(path_keys: &[&str], value: &str) -> Result<()> {
         String::new()
     };
 
-    let mut doc: toml_edit::DocumentMut = existing
-        .parse()
-        .context("flov.toml is not valid TOML")?;
+    let mut doc: toml_edit::DocumentMut =
+        existing.parse().context("flov.toml is not valid TOML")?;
 
-    let (last, parents) = path_keys
-        .split_last()
-        .expect("path_keys must be non-empty");
+    let (last, parents) = path_keys.split_last().expect("path_keys must be non-empty");
 
     let mut node = doc.as_item_mut();
     for k in parents {
@@ -246,9 +242,7 @@ fn write_field(path_keys: &[&str], value: &str) -> Result<()> {
         if node.is_none() {
             *node = toml_edit::Item::Table(toml_edit::Table::new());
         }
-        let table = node
-            .as_table_mut()
-            .expect("checked above");
+        let table = node.as_table_mut().expect("checked above");
         if !table.contains_key(k) {
             table.insert(k, toml_edit::Item::Table(toml_edit::Table::new()));
         }
@@ -259,7 +253,6 @@ fn write_field(path_keys: &[&str], value: &str) -> Result<()> {
         .with_context(|| format!("flov.toml [{}] is not a table", parents.join(".")))?;
     table[*last] = toml_edit::value(value);
 
-    std::fs::write(&path, doc.to_string())
-        .with_context(|| format!("write {:?}", path))?;
+    std::fs::write(&path, doc.to_string()).with_context(|| format!("write {:?}", path))?;
     Ok(())
 }

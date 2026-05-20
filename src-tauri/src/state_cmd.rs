@@ -118,8 +118,7 @@ pub fn set_postprocess_config(
 ) -> Result<(), String> {
     crate::config::Config::write_openrouter_field("api_key", &api_key)
         .map_err(|e| e.to_string())?;
-    crate::config::Config::write_openrouter_field("model", &model)
-        .map_err(|e| e.to_string())?;
+    crate::config::Config::write_openrouter_field("model", &model).map_err(|e| e.to_string())?;
     crate::config::Config::write_openrouter_field("system_prompt", &system_prompt)
         .map_err(|e| e.to_string())?;
 
@@ -153,12 +152,14 @@ pub struct HotkeyView {
 
 #[tauri::command]
 pub fn get_hotkey(state: State<AppState>) -> HotkeyView {
-    HotkeyView { combo: state.hotkey_combo.lock().unwrap().clone() }
+    HotkeyView {
+        combo: state.hotkey_combo.lock().unwrap().clone(),
+    }
 }
 
 #[tauri::command]
 pub fn set_hotkey(combo: String, state: State<AppState>) -> Result<(), String> {
-    let def = crate::hotkey::HotkeyDef::parse(&combo).map_err(|e| e)?;
+    let def = crate::hotkey::HotkeyDef::parse(&combo)?;
     crate::config::Config::write_hotkey_combo(&combo).map_err(|e| e.to_string())?;
     crate::hotkey::set_hotkey_def(def);
     *state.hotkey_combo.lock().unwrap() = combo.clone();
@@ -187,12 +188,19 @@ pub fn set_audio_input(device: Option<String>, state: State<AppState>) -> Result
     // Empty / null = revert to system default.
     let cleaned = device.and_then(|s| {
         let t = s.trim().to_string();
-        if t.is_empty() { None } else { Some(t) }
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
     });
     crate::config::Config::write_audio_device(cleaned.as_deref().unwrap_or(""))
         .map_err(|e| e.to_string())?;
     *state.audio_device.lock().unwrap() = cleaned.clone();
-    tracing::info!("audio device selected: {:?} (takes effect after restart)", cleaned);
+    tracing::info!(
+        "audio device selected: {:?} (takes effect after restart)",
+        cleaned
+    );
     Ok(())
 }
 

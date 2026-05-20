@@ -17,6 +17,7 @@ UI: Tauri 2 webview с Svelte 5. Frontend рендерит Mac-style капсу�
 ```
 flov/
 ├── Cargo.toml          # workspace root: members = ["src-tauri"], exclude = ["crates/*"]
+├── AGENTS.md           # hard rules + gotchas for future coding agents
 ├── .cargo/config.toml  # CMake/CUDA env для whisper.cpp build (нужно для CUDA sidecar)
 ├── flov.toml           # дев-конфиг (gitignored), копия в target/debug/
 ├── dev.cmd             # one-click рестарт: PATH+=cargo, tauri dev из root
@@ -84,7 +85,8 @@ flov/
 ├── dev.sh                   # macOS/Linux hot-reload entry (стейджит sidecars)
 └── docs/
     ├── DESIGN.md
-    └── MACOS.md              # детали macOS port (permissions, дефолтный хоткей, paths)
+    ├── MACOS.md              # детали macOS port (permissions, дефолтный хоткей, paths)
+    └── REPORT.md             # Windows reliability investigation / 0.2.2 report
 ```
 
 ## Транскрипция через sidecars
@@ -151,6 +153,15 @@ the correct state"), leaving tray Open Settings as a silent no-op because
 creates it on demand, logs any failure, and the frontend close button uses
 `window.close()` so the settings WebView is destroyed instead of sitting in
 hidden/suspended state for hours.
+
+Windows WebView2 also requires webviews with different environment settings
+to use different data directories. The main pill has custom
+`additionalBrowserArgs` for occlusion/background throttling, so lazy Settings
+uses a dedicated `webview-settings` data dir. Without that, WebView2 can fail
+the second webview with the same `0x8007139F` while Tauri still leaves behind
+a blank window wrapper. Existing Settings wrappers are validated with
+`window.eval("void 0")`; if the underlying WebView is dead, the wrapper is
+closed and recreated.
 
 ## Hotkey
 

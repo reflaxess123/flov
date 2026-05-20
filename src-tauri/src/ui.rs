@@ -58,12 +58,38 @@ fn touch_overlay_activity() {
     LAST_OVERLAY_ACTIVITY_MS.store(now_ms(), Ordering::SeqCst);
 }
 
+#[cfg(target_os = "windows")]
+fn settings_webview_data_dir() -> Option<std::path::PathBuf> {
+    let dir = match crate::paths::user_data_dir() {
+        Ok(dir) => dir.join("webview-settings"),
+        Err(e) => {
+            tracing::warn!("settings webview data dir unavailable: {:#}", e);
+            return None;
+        }
+    };
+
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!("settings webview data dir create failed {:?}: {}", dir, e);
+        return None;
+    }
+
+    Some(dir)
+}
+
 pub fn open_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window("settings") {
-        window.show()?;
-        window.set_focus()?;
-        tracing::info!("settings window shown");
-        return Ok(());
+        if let Err(e) = window.eval("void 0") {
+            tracing::warn!(
+                "settings window exists but webview is not usable; recreating it: {}",
+                e
+            );
+            let _ = window.close();
+        } else {
+            window.show()?;
+            window.set_focus()?;
+            tracing::info!("settings window shown");
+            return Ok(());
+        }
     }
 
     tracing::info!("creating settings window on demand");
@@ -82,6 +108,19 @@ pub fn open_settings_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     .skip_taskbar(false)
     .focused(true)
     .center();
+
+    // WebView2 requires webviews with different environment settings
+    // (notably additional browser args) to use different data directories.
+    // The main pill disables native occlusion with custom Chromium flags, so
+    // Settings must not share its default profile or it can fail with
+    // 0x8007139F while leaving behind a blank window shell.
+    #[cfg(target_os = "windows")]
+    let builder = if let Some(data_dir) = settings_webview_data_dir() {
+        tracing::info!("settings webview data dir: {:?}", data_dir);
+        builder.data_directory(data_dir)
+    } else {
+        builder
+    };
 
     // On Windows the old hidden+transparent settings webview sometimes failed
     // at startup with WebView2 0x8007139F and left tray Open Settings as a

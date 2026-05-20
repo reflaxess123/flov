@@ -3,6 +3,8 @@
 Voice-to-text для Windows и macOS (Apple Silicon). Зажми хоткей, говори,
 отпусти — текст вставляется в активное поле через буфер обмена.
 
+Текущая версия: `0.2.2`.
+
 Транскрипция локальная (Whisper.cpp на GPU). Опциональная пост-обработка
 через OpenRouter (clean-up пунктуации/мата/etc).
 
@@ -70,6 +72,28 @@ tccutil reset Microphone com.flov.app
 - **Post-process** — OpenRouter API key, модель, системный промпт
 - **Hotkey** — любая комбинация (включая одиночный RCtrl)
 - **Stats** — heatmap записей по дням
+
+На Windows Settings создаётся лениво при клике в трее. Это важно:
+скрытый transparent WebView2 при старте и второй WebView с другим
+`additionalBrowserArgs` в той же profile папке могут падать с
+`HRESULT(0x8007139F)`. Начиная с `0.2.2` Settings использует отдельный
+WebView2 data dir (`webview-settings`) и пересоздаёт битую window-обёртку,
+если Tauri оставил её после неудачного WebView init.
+
+## Windows reliability notes
+
+Pill window на Windows намеренно не скрывается через OS `window.hide()`.
+В idle оно остаётся живым transparent + click-through HWND с alpha `0`, а
+видимость контролируется Svelte DOM. Это обходит WebView2 hidden/background
+path, где renderer/timers могут быть suspended, а следующий `show()` иногда
+возвращает пустую stale surface.
+
+Периодический reload main WebView нужен против long-session WebView2 rot,
+но он alpha-gated: backend показывает HWND при alpha `0`, frontend ждёт
+`tick()` + `requestAnimationFrame()`, затем вызывает `repaint_window`, и
+только после этого Windows alpha возвращается к `255`. Дополнительно
+`WEBVIEW2_DEFAULT_BACKGROUND_COLOR=00000000` выставляется до создания
+WebView2, чтобы убрать white flash до применения CSS/API.
 
 ## Сборка из исходников (Windows)
 
